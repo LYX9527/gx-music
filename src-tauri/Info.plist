@@ -7,5 +7,9 @@
     <key>NSAllowsArbitraryLoads</key>
     <true/>
   </dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>zh_CN</string>
+  <key>CFBundleAllowMixedLocalizations</key>
+  <true/>
 </dict>
 </plist>

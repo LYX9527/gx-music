@@ -86,6 +86,14 @@
   }
   body {
     @apply bg-background text-foreground;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
+  }
+  /* Allow selection only within input text fields if needed later */
+  input, textarea {
+    user-select: auto;
+    -webkit-user-select: auto;
   }
 }
 

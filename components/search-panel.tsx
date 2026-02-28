@@ -1,8 +1,9 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { Search, X, Play, ListPlus, Loader2, Music } from "lucide-react"
+import { Search, X, Play, ListPlus, Loader2, Music, CheckCheck } from "lucide-react"
 import { searchMusic, type OnlineSong } from "@/hooks/use-online-music"
+import { toast } from "sonner"
 
 interface SearchPanelProps {
     open: boolean
@@ -68,15 +69,33 @@ export function SearchPanel({
         if (e.key === "Escape") onClose()
     }
 
-    if (!open) return null
+    // Animation state
+    const [visible, setVisible] = useState(false)
+    const [animating, setAnimating] = useState(false)
+
+    useEffect(() => {
+        if (open) {
+            setVisible(true)
+            // Start enter animation next frame
+            requestAnimationFrame(() => setAnimating(true))
+        } else {
+            setAnimating(false)
+            // Wait for exit animation to finish before unmount
+            const timer = setTimeout(() => setVisible(false), 200)
+            return () => clearTimeout(timer)
+        }
+    }, [open])
+
+    if (!visible) return null
 
     return (
         <div
             className="fixed inset-0 z-50 flex items-center justify-center"
             style={{
-                background: "rgba(0, 0, 0, 0.7)",
-                backdropFilter: "blur(20px)",
-                WebkitBackdropFilter: "blur(20px)",
+                background: animating ? "rgba(0, 0, 0, 0.7)" : "rgba(0, 0, 0, 0)",
+                backdropFilter: animating ? "blur(20px)" : "blur(0px)",
+                WebkitBackdropFilter: animating ? "blur(20px)" : "blur(0px)",
+                transition: "background 0.25s ease, backdrop-filter 0.25s ease, -webkit-backdrop-filter 0.25s ease",
             }}
             onClick={(e) => {
                 if (e.target === e.currentTarget) onClose()
@@ -90,6 +109,9 @@ export function SearchPanel({
                         "linear-gradient(135deg, rgba(22,22,36,0.98) 0%, rgba(14,14,26,0.99) 100%)",
                     boxShadow:
                         "0 25px 50px -12px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05)",
+                    transform: animating ? "scale(1) translateY(0)" : "scale(0.92) translateY(12px)",
+                    opacity: animating ? 1 : 0,
+                    transition: "transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease",
                 }}
             >
                 {/* Header */}
@@ -141,6 +163,23 @@ export function SearchPanel({
 
                 {/* Results */}
                 <div className="flex-1 overflow-y-auto px-2 py-2">
+                    {/* Batch Actions Header (only show when there are results) */}
+                    {results.length > 0 && (
+                        <div className="flex items-center justify-between px-3 py-2 mb-1 border-b border-white/[0.04] shrink-0">
+                            <span className="text-xs text-white/40">找到 {results.length} 首单曲</span>
+                            <button
+                                onClick={() => {
+                                    results.forEach(onAddToPlaylist)
+                                    toast.success(`成功添加 ${results.length} 首歌曲至列表`)
+                                }}
+                                className="flex items-center gap-1.5 text-xs text-white/50 hover:text-white transition-colors"
+                            >
+                                <CheckCheck className="h-3.5 w-3.5" />
+                                批量添加
+                            </button>
+                        </div>
+                    )}
+
                     {results.length === 0 && !isSearching && !errorMsg && (
                         <div className="flex h-32 items-center justify-center text-white/20">
                             <p className="text-sm">输入关键词搜索在线音乐</p>
@@ -193,7 +232,10 @@ export function SearchPanel({
                                     )}
                                 </button>
                                 <button
-                                    onClick={() => onAddToPlaylist(song)}
+                                    onClick={() => {
+                                        onAddToPlaylist(song)
+                                        toast.success(`已添加《${song.title}》至播放列表`)
+                                    }}
                                     className="rounded-full p-2 text-white/50 transition-colors hover:bg-white/[0.08] hover:text-white/90"
                                     title="加入播放列表"
                                 >

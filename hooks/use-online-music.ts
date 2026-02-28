@@ -22,6 +22,14 @@ export interface OnlineSong {
     album: string
     albummid: string
     coverUrl: string
+    duration?: string
+}
+
+function formatDuration(seconds: number): string {
+    if (!seconds) return "0:00"
+    const m = Math.floor(seconds / 60)
+    const s = Math.floor(seconds % 60)
+    return `${m}:${s.toString().padStart(2, "0")}`
 }
 
 const HEADERS = {
@@ -99,6 +107,7 @@ export async function searchMusic(
                     coverUrl: albummid
                         ? `https://y.qq.com/music/photo_new/T002R300x300M000${albummid}.jpg`
                         : '',
+                    duration: formatDuration(item.interval || 0)
                 }
             })
         } else {

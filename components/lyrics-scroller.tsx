@@ -129,8 +129,8 @@ export function LyricsScroller({
         // Blur far away lines slightly
         const blur = distance > 3 ? 1 : 0
 
-        // Active line subtle beat pulse
-        const beatScale = isActive && isPlaying ? 1 + beatIntensity * 0.02 : 1
+        // Active line no longer pulses to the beat (per user request to remove jitter)
+        const beatScale = 1
 
         return (
           <div
@@ -145,16 +145,15 @@ export function LyricsScroller({
             }}
           >
             <p
-              className={`text-center text-balance leading-relaxed font-medium transition-colors duration-500 ${
-                isActive
-                  ? "text-foreground text-lg"
+              className={`text-center text-balance leading-relaxed font-medium transition-all duration-500 ${isActive
+                  ? "text-white text-[22px] font-bold tracking-wide"
                   : isPast
-                    ? "text-muted-foreground text-base"
-                    : "text-muted-foreground text-base"
-              }`}
+                    ? "text-white/40 text-[17px]"
+                    : "text-white/30 text-[17px]"
+                }`}
               style={{
-                textShadow: isActive && isPlaying
-                  ? `0 0 ${12 + beatIntensity * 10}px oklch(0.72 0.19 18 / ${0.15 + beatIntensity * 0.15})`
+                textShadow: isActive
+                  ? `0 2px 12px rgba(255, 255, 255, 0.3)`
                   : undefined,
               }}
             >

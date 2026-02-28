@@ -34,6 +34,8 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
     const frequencyDataRef = useRef<Uint8Array | null>(null)
     const onEndedRef = useRef(options?.onEnded)
     const prevBeatRef = useRef(0)
+    // To keep sync of volume when GainNode is created later
+    const volumeRef = useRef<number>(1)
 
     // Keep onEnded callback ref updated
     useEffect(() => {
@@ -83,6 +85,8 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
         analyserRef.current = analyser
 
         const gain = ctx.createGain()
+        // Apply the volume that was set before instantiation
+        gain.gain.value = volumeRef.current
         gainRef.current = gain
 
         const source = ctx.createMediaElementSource(audioRef.current!)
@@ -105,7 +109,7 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
             if (audio && !audio.paused) {
                 let beatIntensity = 0
                 if (analyser && freqData) {
-                    analyser.getByteFrequencyData(freqData)
+                    analyser.getByteFrequencyData(freqData as Uint8Array<ArrayBuffer>)
 
                     // Calculate beat intensity from bass frequencies (bins 0~8)
                     let bassSum = 0
@@ -138,7 +142,7 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
                     currentTime: audio.currentTime,
                     isPlaying: true,
                     beatIntensity,
-                    frequencyData: freqData ? new Uint8Array(freqData) : null,
+                    frequencyData: freqData ? freqData.slice() : null,
                 }))
             }
 
@@ -169,6 +173,10 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
             }
 
             audio.src = url
+            // Keep current volume when loading new track
+            if (gainRef.current) {
+                // If we also want to apply gain based volume here in future we can
+            }
             audio.load()
         },
         [ensureAudioContext]
@@ -216,10 +224,37 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
     const setVolume = useCallback((volume: number) => {
         // volume: 0~100
         const audio = audioRef.current
+        const val = Math.max(0, Math.min(1, volume / 100))
+        volumeRef.current = val
+
         if (audio) {
-            audio.volume = Math.max(0, Math.min(1, volume / 100))
+            // Also keep standard audio.volume synced just in case we don't have AudioContext attached
+            audio.volume = val
+        }
+        if (gainRef.current) {
+            gainRef.current.gain.value = val
         }
     }, [])
+
+    const updateMediaSession = useCallback((track: { title: string, artist: string, album?: string, coverUrl?: string }) => {
+        if ("mediaSession" in navigator) {
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: track.title,
+                artist: track.artist,
+                album: track.album || "",
+                artwork: track.coverUrl ? [{ src: track.coverUrl, sizes: '512x512', type: 'image/jpeg' }] : []
+            });
+        }
+    }, [])
+
+    // Register media session hardware controls once
+    useEffect(() => {
+        if ("mediaSession" in navigator) {
+            navigator.mediaSession.setActionHandler("play", play)
+            navigator.mediaSession.setActionHandler("pause", pause)
+            // The Next/Prev handlers need to be bound by the parent component (music-player) since useAudioPlayer doesn't manage the playlist queue
+        }
+    }, [play, pause])
 
     return {
         ...state,
@@ -229,5 +264,6 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
         togglePlay,
         seek,
         setVolume,
+        updateMediaSession,
     }
 }
