@@ -63,9 +63,9 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          if (Test-Path app/api) { Rename-Item app/api .api_backup }
+          if (Test-Path app/api) { Move-Item app/api .api_backup -Force }
           npx next build
-          if (Test-Path .api_backup) { Rename-Item .api_backup api; Move-Item api app/api }
+          if (Test-Path .api_backup) { Move-Item .api_backup app/api -Force }
 
       - name: Build frontend (macOS)
         if: matrix.platform == 'macos-latest'
