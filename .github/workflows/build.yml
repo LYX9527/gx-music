@@ -46,8 +46,17 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Install npm dependencies
+      - name: Install npm dependencies (macOS)
+        if: matrix.platform == 'macos-latest'
         run: npm install
+
+      # Windows 需要删除 macOS 生成的 lock 文件，让 npm 重新解析平台专属原生模块
+      - name: Install npm dependencies (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          Remove-Item package-lock.json -ErrorAction SilentlyContinue
+          npm install
 
       # 手动构建前端（跨平台兼容）
       - name: Build frontend (Windows)
