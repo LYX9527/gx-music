@@ -12,7 +12,7 @@ src-tauri/target/
 .idea/
 
 # Package managers (keep pnpm-lock.yaml, ignore others)
-package-lock.json
+
 yarn.lock
 
 # Temporary files
