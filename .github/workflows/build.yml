@@ -35,7 +35,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -48,7 +47,7 @@ jobs:
           workspaces: src-tauri -> target
 
       - name: Install npm dependencies
-        run: npm ci
+        run: npm install
 
       # 手动构建前端（跨平台兼容）
       - name: Build frontend (Windows)
