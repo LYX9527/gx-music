@@ -1,15 +1,20 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { Search, X, Play, ListPlus, Loader2, Music, CheckCheck } from "lucide-react"
+import { Search, X, Play, ListPlus, Loader2, Music, CheckCheck, Download } from "lucide-react"
 import { searchMusic, type OnlineSong } from "@/hooks/use-online-music"
 import { toast } from "sonner"
+
+import { type Track } from "./track-list"
 
 interface SearchPanelProps {
     open: boolean
     onClose: () => void
     onPlay: (song: OnlineSong) => void
     onAddToPlaylist: (song: OnlineSong) => void
+    onDownload?: (track: Track) => void
+    downloadedIds?: Set<string>
+    downloadingIds?: Set<string>
 }
 
 export function SearchPanel({
@@ -17,6 +22,9 @@ export function SearchPanel({
     onClose,
     onPlay,
     onAddToPlaylist,
+    onDownload,
+    downloadedIds,
+    downloadingIds,
 }: SearchPanelProps) {
     const [query, setQuery] = useState("")
     const [results, setResults] = useState<OnlineSong[]>([])
@@ -170,7 +178,6 @@ export function SearchPanel({
                             <button
                                 onClick={() => {
                                     results.forEach(onAddToPlaylist)
-                                    toast.success(`成功添加 ${results.length} 首歌曲至列表`)
                                 }}
                                 className="flex items-center gap-1.5 text-xs text-white/50 hover:text-white transition-colors"
                             >
@@ -234,13 +241,42 @@ export function SearchPanel({
                                 <button
                                     onClick={() => {
                                         onAddToPlaylist(song)
-                                        toast.success(`已添加《${song.title}》至播放列表`)
                                     }}
                                     className="rounded-full p-2 text-white/50 transition-colors hover:bg-white/[0.08] hover:text-white/90"
                                     title="加入播放列表"
                                 >
                                     <ListPlus className="h-4 w-4" />
                                 </button>
+                                {onDownload && (
+                                    downloadedIds?.has(song.songmid) ? (
+                                        <span title="已下载" className="flex items-center justify-center p-2">
+                                            <CheckCheck className="h-4 w-4 text-emerald-400" />
+                                        </span>
+                                    ) : downloadingIds?.has(song.songmid) ? (
+                                        <div className="flex items-center justify-center p-2">
+                                            <Loader2 className="h-4 w-4 text-white/40 animate-spin" />
+                                        </div>
+                                    ) : (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                onDownload({
+                                                    id: song.songmid,
+                                                    songmid: song.songmid,
+                                                    title: song.title,
+                                                    artist: song.artist,
+                                                    album: song.album || "Unknown Album",
+                                                    cover: song.coverUrl || "",
+                                                    duration: song.duration,
+                                                });
+                                            }}
+                                            className="rounded-full p-2 text-white/50 transition-colors hover:bg-white/[0.08] hover:text-white/90"
+                                            title="下载到本地"
+                                        >
+                                            <Download className="h-4 w-4" />
+                                        </button>
+                                    )
+                                )}
                             </div>
                         </div>
                     ))}

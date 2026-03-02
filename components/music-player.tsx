@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
-import { Search, Compass, ListMusic, Music } from "lucide-react"
+import { Search, Compass, ListMusic, Music, FolderOpen, RefreshCw, FolderPlus, Plus, MoreHorizontal, Pencil, Trash2, X } from "lucide-react"
 import { MacOSWindowControls } from "./macos-window-controls"
 import { AlbumArtwork } from "./album-artwork"
 import { AudioVisualizer } from "./audio-visualizer"
@@ -11,43 +11,62 @@ import { SearchPanel } from "./search-panel"
 import { useImageColors } from "@/hooks/use-image-colors"
 import { useAudioPlayer } from "@/hooks/use-audio-player"
 import { getMediaUrl, getLyric, type OnlineSong } from "@/hooks/use-online-music"
-import { TrackList, type Track } from "./track-list" // Keep this import for TrackList component
+import { useDownload } from "@/hooks/use-download"
+import { TrackList, type Track } from "./track-list"
+import { usePlaylistManager } from "@/hooks/use-playlist-manager"
+import { useLocalScan } from "@/hooks/use-local-scan"
 
-const PLAYLIST_STORAGE_KEY = "muse_playlist"
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+  ContextMenuSeparator,
+} from "@/components/ui/context-menu"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog"
+import { PlaylistSelector } from "./playlist-selector"
+
 const PLAYBACK_STATE_KEY = "muse_playback_state"
 
-type ViewMode = "discover" | "playing" | "playlist"
+type ViewMode = "discover" | "playing" | "playlist" | "local"
 
 export function MusicPlayer() {
-  const [playlist, setPlaylist] = useState<Track[]>([])
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null)
   const [lyricsData, setLyricsData] = useState<LyricLine[]>([])
   // viewMode controls the main content area display
   const [viewMode, setViewMode] = useState<ViewMode>("discover")
   const [showSearch, setShowSearch] = useState(false)
+  const [playlistSelectorTrack, setPlaylistSelectorTrack] = useState<Track | null>(null)
+
+  // Custom dialogs to prevent AudioContext suspension
+  const [createPlaylistOpen, setCreatePlaylistOpen] = useState(false)
+  const [createPlaylistInput, setCreatePlaylistInput] = useState("")
+
+  const [renamePlaylistTarget, setRenamePlaylistTarget] = useState<{ id: string, name: string } | null>(null)
+  const [deletePlaylistTarget, setDeletePlaylistTarget] = useState<{ id: string, name: string } | null>(null)
+  const [renameInput, setRenameInput] = useState("")
+
   const [volume, setVolume] = useState(100)
   const [playMode, setPlayMode] = useState<PlayMode>("list")
 
-  // Load playlist from localStorage on mount
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(PLAYLIST_STORAGE_KEY)
-      if (saved) {
-        setPlaylist(JSON.parse(saved))
-      }
-    } catch (e) {
-      console.error("Failed to load playlist", e)
-    }
-  }, [])
+  // Which list is currently driving playback
+  const [playSource, setPlaySource] = useState<"playlist" | "local">("playlist")
 
-  // Save playlist to localStorage whenever it changes
-  useEffect(() => {
-    if (playlist.length > 0) {
-      localStorage.setItem(PLAYLIST_STORAGE_KEY, JSON.stringify(playlist))
-    } else {
-      localStorage.removeItem(PLAYLIST_STORAGE_KEY)
-    }
-  }, [playlist])
+  // Hooks
+  const { downloadedIds, downloadingIds, download, getLocalUrl, getLocalLyrics } = useDownload()
+  const playlistManager = usePlaylistManager()
+  const localScan = useLocalScan()
+
+  const currentQueue = playSource === "local" ? localScan.localTracks : playlistManager.activePlaylist.tracks
+
+  // Load playlist from localStorage on mount
+  // (Removed old playlist sync as we use playlistManager now)
 
 
   // Image colors extraction for ambient background
@@ -84,17 +103,31 @@ export function MusicPlayer() {
       const saved = JSON.parse(raw)
       if (saved?.track?.songmid) {
         setCurrentTrack(saved.track)
-        // Load the track without auto-playing, then seek to saved progress
-        getMediaUrl(saved.track.songmid).then((url) => {
+
+        const restoreTrack = async () => {
+          // Try local file first
+          const localUrl = await getLocalUrl(saved.track.songmid)
+          const url = localUrl || await getMediaUrl(saved.track.songmid)
           if (!url) return
-          player.loadUrl(url).then(() => {
-            if (saved.time > 0) {
-              player.seek(saved.time)
-            }
+
+          await player.loadUrl(url)
+          if (saved.time > 0) {
+            player.seek(saved.time)
+          }
+
+          // Load lyrics (local first, then online)
+          if (localUrl) {
+            const localLyrics = await getLocalLyrics(saved.track.songmid)
+            if (localLyrics) setLyricsData(localLyrics)
+            else getLyric(saved.track.songmid).then(setLyricsData)
+          } else {
             getLyric(saved.track.songmid).then(setLyricsData)
-            player.updateMediaSession(saved.track)
-          })
-        })
+          }
+
+          player.updateMediaSession(saved.track)
+        }
+
+        restoreTrack()
       }
     } catch (e) {
       console.error("Failed to restore playback state", e)
@@ -104,58 +137,90 @@ export function MusicPlayer() {
 
   // Previous Track Logic
   const handlePrev = useCallback(() => {
-    if (playlist.length === 0 || !currentTrack) return
-    let idx = playlist.findIndex((t) => t.id === currentTrack.id)
+    if (currentQueue.length === 0 || !currentTrack) return
+    let idx = currentQueue.findIndex((t) => t.id === currentTrack.id)
     if (playMode === "shuffle") {
-      idx = Math.floor(Math.random() * playlist.length)
+      idx = Math.floor(Math.random() * currentQueue.length)
     } else {
-      idx = idx - 1 < 0 ? playlist.length - 1 : idx - 1
+      idx = idx - 1 < 0 ? currentQueue.length - 1 : idx - 1
     }
-    playTrack(playlist[idx])
+    playTrack(currentQueue[idx])
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack, playlist, playMode])
+  }, [currentTrack, currentQueue, playMode])
 
   // Next Track Logic
   const handleNext = useCallback(() => {
-    if (playlist.length === 0 || !currentTrack) return
-    let idx = playlist.findIndex((t) => t.id === currentTrack.id)
+    if (currentQueue.length === 0 || !currentTrack) return
+    let idx = currentQueue.findIndex((t) => t.id === currentTrack.id)
     if (playMode === "shuffle") {
-      idx = Math.floor(Math.random() * playlist.length)
+      idx = Math.floor(Math.random() * currentQueue.length)
     } else if (playMode === "single") {
       // Replay same
     } else {
-      idx = (idx + 1) % playlist.length
+      idx = (idx + 1) % currentQueue.length
     }
-    playTrack(playlist[idx])
+    playTrack(currentQueue[idx])
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack, playlist, playMode])
+  }, [currentTrack, currentQueue, playMode])
 
   // Update ref whenever handleNext changes
   useEffect(() => {
     handleNextRef.current = handleNext
   }, [handleNext])
 
+  // Download handler
+  const handleDownload = useCallback(async (track: Track) => {
+    const ok = await download(track)
+    if (ok) {
+      console.log(`下载成功: ${track.title}`)
+    } else {
+      console.error(`下载失败: ${track.title}`)
+    }
+  }, [download])
+
   const playTrack = async (track: Track) => {
-    if (!track.songmid) return
+    if (!track.songmid && !track.localUrl) return
 
     setCurrentTrack(track)
     setLyricsData([]) // Clear old lyrics
 
     try {
-      // 1. Fetch streaming URL
-      const url = await getMediaUrl(track.songmid)
+      // Update macOS Control Center Now Playing Metadata
+      player.updateMediaSession(track)
+
+      // 1. Local-only track from useLocalScan (has no songmid)
+      if (track.localUrl && !track.songmid) {
+        await player.loadUrl(track.localUrl)
+        player.setVolume(volume)
+        player.play()
+        return
+      }
+
+      // 2. Try local file first (downloaded offline with songmid)
+      const localUrl = await getLocalUrl(track.songmid!)
+      if (localUrl) {
+        // Load local lyrics
+        getLocalLyrics(track.songmid!).then((lyrics) => {
+          if (lyrics) setLyricsData(lyrics)
+          else getLyric(track.songmid!).then(setLyricsData)
+        })
+        await player.loadUrl(localUrl)
+        player.setVolume(volume)
+        player.play()
+        return
+      }
+
+      // 3. Fallback: Fetch streaming URL from online
+      const url = await getMediaUrl(track.songmid!)
       if (!url) {
         console.error("No play URL found")
         return
       }
 
-      // Update macOS Control Center Now Playing Metadata
-      player.updateMediaSession(track)
+      // 4. Fetch lyrics concurrently with audio loading
+      getLyric(track.songmid!).then(setLyricsData)
 
-      // 2. Fetch lyrics concurrently with audio loading
-      getLyric(track.songmid).then(setLyricsData)
-
-      // 3. Play audio
+      // 5. Play audio
       await player.loadUrl(url)
       player.setVolume(volume)
       player.play()
@@ -164,17 +229,17 @@ export function MusicPlayer() {
     }
   }
 
-  const handleTrackSelect = (track: Track) => {
+  const handleTrackSelect = (track: Track, source: "playlist" | "local" = "playlist") => {
     if (currentTrack?.id === track.id) {
       player.togglePlay()
     } else {
+      setPlaySource(source)
       playTrack(track)
     }
   }
 
   const handleTrackRemove = (track: Track) => {
-    const newPlaylist = playlist.filter((t) => t.id !== track.id)
-    setPlaylist(newPlaylist)
+    playlistManager.removeTrackFromPlaylist(playlistManager.activePlaylistId, track.id)
     if (currentTrack?.id === track.id) {
       player.pause()
       setCurrentTrack(null)
@@ -182,24 +247,25 @@ export function MusicPlayer() {
     }
   }
 
-  const handleAddToPlaylist = (song: OnlineSong) => {
-    if (playlist.some((t) => t.id === song.songmid)) return
-
-    const newTrack: Track = {
-      id: song.songmid,
-      songmid: song.songmid,
-      title: song.title,
-      artist: song.artist,
-      album: song.album || "Unknown Album",
-      cover: song.coverUrl || "",
-      duration: song.duration,
+  const handleAddToPlaylistPrompt = (item: Track | OnlineSong) => {
+    // Determine if it's OnlineSong by checking for coverUrl
+    if ("coverUrl" in item) {
+      setPlaylistSelectorTrack({
+        id: item.songmid,
+        songmid: item.songmid,
+        title: item.title,
+        artist: item.artist,
+        album: item.album || "Unknown Album",
+        cover: item.coverUrl || "",
+        duration: item.duration,
+      })
+    } else {
+      setPlaylistSelectorTrack(item)
     }
-
-    setPlaylist((prev) => [...prev, newTrack])
   }
 
   const handlePlayOnlineSong = (song: OnlineSong) => {
-    let track = playlist.find((t) => t.id === song.songmid)
+    let track = playlistManager.activePlaylist.tracks.find((t) => t.id === song.songmid)
     if (!track) {
       track = {
         id: song.songmid,
@@ -210,9 +276,10 @@ export function MusicPlayer() {
         cover: song.coverUrl || "",
         duration: song.duration,
       }
-      setPlaylist((prev) => [...prev, track!])
+      playlistManager.addTrackToActive(track)
     }
 
+    setPlaySource("playlist")
     playTrack(track)
     setShowSearch(false)
     setViewMode("playing")
@@ -224,13 +291,12 @@ export function MusicPlayer() {
   }
 
   // Register Global Media Session next/prev actions
-  // (We use a ref internally inside use-audio-player for pause/play, but here we can safely attach the next/prev handlers because we have the playlist context)
   useEffect(() => {
     if ("mediaSession" in navigator) {
       navigator.mediaSession.setActionHandler("previoustrack", handlePrev)
       navigator.mediaSession.setActionHandler("nexttrack", handleNext)
     }
-  }, [playlist, currentTrack, playMode]) // Added deps rather than handlePrev/handleNext directly based on the outer scope changes
+  }, [currentQueue, currentTrack, playMode]) // Added deps rather than handlePrev/handleNext directly based on the outer scope changes
 
   // Build rgba helpers for gradient layers
   const dominantRgba = (a: number) =>
@@ -246,7 +312,10 @@ export function MusicPlayer() {
         open={showSearch}
         onClose={() => setShowSearch(false)}
         onPlay={handlePlayOnlineSong}
-        onAddToPlaylist={handleAddToPlaylist}
+        onAddToPlaylist={handleAddToPlaylistPrompt}
+        onDownload={handleDownload}
+        downloadedIds={downloadedIds}
+        downloadingIds={downloadingIds}
       />
 
       <div
@@ -312,13 +381,79 @@ export function MusicPlayer() {
             <div className="mb-3 pl-2 text-[11px] font-bold tracking-widest text-muted-foreground/70">我的音乐</div>
             <nav className="flex flex-col gap-1.5">
               <button
-                onClick={() => setViewMode("playlist")}
-                className={`flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${viewMode === "playlist" ? "bg-foreground/[0.08] text-foreground" : "text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground"
+                onClick={() => setViewMode("local")}
+                className={`flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${viewMode === "local" ? "bg-primary text-primary-foreground shadow-sm" : "text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground"
                   }`}
               >
-                <ListMusic className="h-4 w-4" />
-                播放列表
+                <FolderOpen className="h-4 w-4" />
+                本地音乐
               </button>
+            </nav>
+
+            <div className="mt-8 mb-3 pl-2 flex items-center justify-between text-[11px] font-bold tracking-widest text-muted-foreground/70">
+              <span>创建的歌单</span>
+              <button
+                onClick={() => {
+                  setCreatePlaylistInput("新建歌单")
+                  setCreatePlaylistOpen(true)
+                }}
+                className="hover:text-foreground transition-colors p-1 rounded-sm hover:bg-foreground/10"
+                title="新建歌单"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <nav className="flex flex-col gap-0.5 overflow-y-auto min-h-0 flex-1 -mx-2 px-2 pb-4">
+              {playlistManager.playlists.map(p => (
+                <ContextMenu key={p.id}>
+                  <ContextMenuTrigger>
+                    <button
+                      onClick={() => {
+                        playlistManager.setActivePlaylist(p.id)
+                        setViewMode("playlist")
+                      }}
+                      className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${viewMode === "playlist" && playlistManager.activePlaylistId === p.id ? "bg-foreground/[0.08] text-foreground" : "text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground"
+                        }`}
+                    >
+                      <ListMusic className="h-4 w-4 shrink-0" />
+                      <span className="truncate flex-1 text-left">{p.name}</span>
+                      {viewMode === "playlist" && playlistManager.activePlaylistId === p.id && (
+                        <div className="w-1.5 h-1.5 rounded-full bg-primary shrink-0" />
+                      )}
+                    </button>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent className="w-48 bg-background/95 backdrop-blur-xl border-white/10 text-foreground">
+                    <ContextMenuItem
+                      onSelect={(e) => {
+                        const id = p.id;
+                        const name = p.name;
+                        setTimeout(() => {
+                          setRenameInput(name);
+                          setRenamePlaylistTarget({ id, name });
+                        }, 50);
+                      }}
+                      className="gap-2 cursor-pointer focus:bg-white/10 focus:text-white text-sm"
+                      disabled={p.id === "default"}
+                    >
+                      <Pencil className="h-4 w-4" />重命名
+                    </ContextMenuItem>
+                    <ContextMenuSeparator className="bg-white/10" />
+                    <ContextMenuItem
+                      onSelect={(e) => {
+                        const id = p.id;
+                        const name = p.name;
+                        setTimeout(() => {
+                          setDeletePlaylistTarget({ id, name });
+                        }, 50);
+                      }}
+                      className="text-red-400 gap-2 cursor-pointer focus:bg-red-500/20 focus:text-red-400 text-sm"
+                      disabled={p.id === "default"}
+                    >
+                      <Trash2 className="h-4 w-4" />删除
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
+              ))}
             </nav>
           </div>
 
@@ -346,6 +481,78 @@ export function MusicPlayer() {
               </div>
             </div>
 
+            {/* View: Local Music */}
+            <div
+              className={`absolute inset-0 transition-all duration-700 ease-out flex flex-col ${viewMode === "local" ? "opacity-100 pointer-events-auto translate-y-0" : "opacity-0 pointer-events-none translate-y-4"}`}
+            >
+              <div className="p-10 max-w-4xl mx-auto h-full flex flex-col w-full pb-24">
+                <div className="mb-6 flex flex-col gap-4 border-b border-foreground/[0.04] pb-5 shrink-0">
+                  <div className="flex items-end justify-between">
+                    <div>
+                      <h2 className="text-[28px] font-bold tracking-tight text-white mb-2">本地音乐</h2>
+                      <p className="text-[13px] font-medium text-muted-foreground">{localScan.localTracks.length} 首歌曲</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={localScan.addFolder}
+                        className="flex items-center gap-1.5 rounded-full bg-foreground/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-foreground/[0.12]"
+                      >
+                        <FolderPlus className="h-3.5 w-3.5" />
+                        添加文件夹
+                      </button>
+                      <button
+                        onClick={localScan.rescan}
+                        disabled={localScan.isScanning || localScan.folders.length === 0}
+                        className="flex items-center gap-1.5 rounded-full bg-foreground/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-foreground/[0.12] disabled:opacity-50"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 ${localScan.isScanning ? "animate-spin" : ""}`} />
+                        刷新
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Folders List */}
+                  {localScan.folders.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {localScan.folders.map(folder => (
+                        <div key={folder} className="flex items-center gap-1.5 bg-background/50 border border-white/5 rounded-md px-2 py-1 text-xs text-muted-foreground">
+                          <FolderOpen className="h-3 w-3" />
+                          <span className="max-w-[150px] truncate" title={folder}>{folder.split(/[\\/]/).pop()}</span>
+                          <button
+                            onClick={() => localScan.removeFolder(folder)}
+                            className="hover:text-red-400 p-0.5 rounded-sm hover:bg-white/10"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex-1 overflow-y-auto min-h-0 pr-2">
+                  <TrackList
+                    tracks={localScan.localTracks}
+                    currentTrack={currentTrack}
+                    isPlaying={player.isPlaying}
+                    onTrackSelect={(track) => handleTrackSelect(track, "local")}
+                    frequencyData={player.frequencyData}
+                    onAddToPlaylist={handleAddToPlaylistPrompt}
+                    hideEmptyState={true}
+                  />
+                  {localScan.localTracks.length === 0 && localScan.folders.length === 0 && (
+                    <div className="flex h-full flex-col items-center justify-center text-muted-foreground">
+                      <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-foreground/5 mb-4">
+                        <FolderOpen className="h-8 w-8 opacity-40" />
+                      </div>
+                      <p className="text-sm font-medium text-foreground/80 mb-1">未添加本地文件夹</p>
+                      <p className="text-xs opacity-60">请点击右上方按钮添加包含音乐的文件夹</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
             {/* View: Playlist */}
             <div
               className={`absolute inset-0 transition-all duration-700 ease-out overflow-y-auto ${viewMode === "playlist" ? "opacity-100 pointer-events-auto translate-y-0" : "opacity-0 pointer-events-none translate-y-4"}`}
@@ -353,18 +560,21 @@ export function MusicPlayer() {
               <div className="p-10 max-w-4xl mx-auto h-full flex flex-col pb-24">
                 <div className="mb-6 flex items-end justify-between border-b border-foreground/[0.04] pb-5 shrink-0">
                   <div>
-                    <h2 className="text-[28px] font-bold tracking-tight text-white mb-2">默认列表</h2>
-                    <p className="text-[13px] font-medium text-muted-foreground">共计 {playlist.length} 首歌曲</p>
+                    <h2 className="text-[28px] font-bold tracking-tight text-white mb-2">{playlistManager.activePlaylist.name}</h2>
+                    <p className="text-[13px] font-medium text-muted-foreground">共计 {playlistManager.activePlaylist.tracks.length} 首歌曲</p>
                   </div>
                 </div>
                 <div className="flex-1 overflow-y-auto min-h-0 pr-2">
                   <TrackList
-                    tracks={playlist}
+                    tracks={playlistManager.activePlaylist.tracks}
                     currentTrack={currentTrack}
                     isPlaying={player.isPlaying}
-                    onTrackSelect={handleTrackSelect}
+                    onTrackSelect={(track) => handleTrackSelect(track, "playlist")}
                     onTrackRemove={handleTrackRemove}
                     frequencyData={player.frequencyData}
+                    downloadedIds={downloadedIds}
+                    downloadingIds={downloadingIds}
+                    onDownload={handleDownload}
                   />
                 </div>
               </div>
@@ -453,6 +663,139 @@ export function MusicPlayer() {
           viewMode={viewMode}
           onToggleView={(mode) => setViewMode(mode)}
         />
+
+        <PlaylistSelector
+          open={!!playlistSelectorTrack}
+          onOpenChange={(open) => { if (!open) setPlaylistSelectorTrack(null) }}
+          playlists={playlistManager.playlists}
+          onSelect={(playlist) => {
+            if (playlistSelectorTrack) {
+              playlistManager.addTrackToPlaylist(playlist.id, playlistSelectorTrack)
+            }
+          }}
+        />
+
+        {/* Create Dialog */}
+        <Dialog open={createPlaylistOpen} onOpenChange={setCreatePlaylistOpen}>
+          <DialogContent className="sm:max-w-[400px] bg-background/95 backdrop-blur-xl border-white/10 text-foreground">
+            <DialogHeader>
+              <DialogTitle>新建歌单</DialogTitle>
+            </DialogHeader>
+            <div className="py-4">
+              <input
+                value={createPlaylistInput}
+                onChange={(e) => setCreatePlaylistInput(e.target.value)}
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && createPlaylistInput.trim()) {
+                    playlistManager.createPlaylist(createPlaylistInput.trim())
+                    setCreatePlaylistOpen(false)
+                  }
+                }}
+                className="w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50"
+                placeholder="输入歌单名称..."
+              />
+            </div>
+            <DialogFooter>
+              <button
+                onClick={() => setCreatePlaylistOpen(false)}
+                className="rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-white/10 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  if (createPlaylistInput.trim()) {
+                    playlistManager.createPlaylist(createPlaylistInput.trim())
+                    setCreatePlaylistOpen(false)
+                  }
+                }}
+                disabled={!createPlaylistInput.trim()}
+                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+              >
+                创建
+              </button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Rename Dialog */}
+        <Dialog open={!!renamePlaylistTarget} onOpenChange={(open) => { if (!open) setRenamePlaylistTarget(null) }}>
+          <DialogContent className="sm:max-w-[400px] bg-background/95 backdrop-blur-xl border-white/10 text-foreground">
+            <DialogHeader>
+              <DialogTitle>重命名歌单</DialogTitle>
+            </DialogHeader>
+            <div className="py-4">
+              <input
+                value={renameInput}
+                onChange={(e) => setRenameInput(e.target.value)}
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && renameInput.trim() && renamePlaylistTarget) {
+                    playlistManager.renamePlaylist(renamePlaylistTarget.id, renameInput.trim())
+                    setRenamePlaylistTarget(null)
+                  }
+                }}
+                className="w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50"
+                placeholder="输入新的主列表名称..."
+              />
+            </div>
+            <DialogFooter>
+              <button
+                onClick={() => setRenamePlaylistTarget(null)}
+                className="rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-white/10 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  if (renameInput.trim() && renamePlaylistTarget) {
+                    playlistManager.renamePlaylist(renamePlaylistTarget.id, renameInput.trim())
+                    setRenamePlaylistTarget(null)
+                  }
+                }}
+                disabled={!renameInput.trim()}
+                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+              >
+                保存
+              </button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Delete Dialog */}
+        <Dialog open={!!deletePlaylistTarget} onOpenChange={(open) => { if (!open) setDeletePlaylistTarget(null) }}>
+          <DialogContent className="sm:max-w-[400px] bg-background/95 backdrop-blur-xl border-white/10 text-foreground">
+            <DialogHeader>
+              <DialogTitle>删除歌单</DialogTitle>
+            </DialogHeader>
+            <div className="py-4">
+              <p className="text-sm text-muted-foreground">
+                确定要删除歌单 <span className="text-foreground font-medium">"{deletePlaylistTarget?.name}"</span> 吗？此操作无法撤销。
+              </p>
+            </div>
+            <DialogFooter>
+              <button
+                onClick={() => setDeletePlaylistTarget(null)}
+                className="rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-white/10 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  if (deletePlaylistTarget) {
+                    playlistManager.deletePlaylist(deletePlaylistTarget.id)
+                    setDeletePlaylistTarget(null)
+                  }
+                }}
+                className="rounded-md bg-red-500/80 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 transition-colors"
+              >
+                删除
+              </button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
       </div>
     </div>
   )

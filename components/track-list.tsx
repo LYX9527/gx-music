@@ -1,7 +1,7 @@
 "use client"
 
 import { useRef, useEffect } from "react"
-import { Play, Pause, X } from "lucide-react"
+import { Play, Pause, X, Download, CheckCircle, Loader2, ListPlus } from "lucide-react"
 
 export interface Track {
   id: string | number
@@ -11,6 +11,7 @@ export interface Track {
   album: string
   duration?: string
   cover: string
+  localUrl?: string
 }
 
 interface TrackListProps {
@@ -20,6 +21,11 @@ interface TrackListProps {
   onTrackSelect: (track: Track) => void
   onTrackRemove?: (track: Track) => void
   frequencyData?: Uint8Array | null
+  downloadedIds?: Set<string>
+  downloadingIds?: Set<string>
+  onDownload?: (track: Track) => void
+  onAddToPlaylist?: (track: Track) => void
+  hideEmptyState?: boolean
 }
 
 /**
@@ -143,8 +149,9 @@ function InlineVisualizer({ frequencyData }: { frequencyData: Uint8Array | null 
   )
 }
 
-export function TrackList({ tracks, currentTrack, isPlaying, onTrackSelect, onTrackRemove, frequencyData }: TrackListProps) {
+export function TrackList({ tracks, currentTrack, isPlaying, onTrackSelect, onTrackRemove, frequencyData, downloadedIds, downloadingIds, onDownload, onAddToPlaylist, hideEmptyState }: TrackListProps) {
   if (tracks.length === 0) {
+    if (hideEmptyState) return null;
     return (
       <div className="flex h-full flex-col items-center justify-center text-muted-foreground">
         <p className="text-sm">播放列表为空</p>
@@ -204,6 +211,37 @@ export function TrackList({ tracks, currentTrack, isPlaying, onTrackSelect, onTr
               </span>
             </div>
 
+            {/* Download indicator / button */}
+            {track.songmid && onDownload && (
+              downloadedIds?.has(track.songmid) ? (
+                <span title="已下载" className="relative z-[1] shrink-0">
+                  <CheckCircle className="h-4 w-4 text-emerald-400" />
+                </span>
+              ) : downloadingIds?.has(track.songmid) ? (
+                <Loader2 className="relative z-[1] h-4 w-4 shrink-0 text-muted-foreground animate-spin" />
+              ) : (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDownload(track) }}
+                  className="relative z-[1] shrink-0 rounded-full p-1.5 text-muted-foreground opacity-0 transition-all hover:bg-foreground/[0.1] hover:text-foreground group-hover:opacity-100"
+                  title="下载到本地"
+                >
+                  <Download className="h-4 w-4" />
+                </button>
+              )
+            )}
+
+            {onAddToPlaylist && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onAddToPlaylist(track);
+                }}
+                className="relative z-[1] shrink-0 rounded-full p-1.5 text-muted-foreground opacity-0 transition-all hover:bg-foreground/[0.1] hover:text-foreground group-hover:opacity-100"
+                title="添加到播放列表"
+              >
+                <ListPlus className="h-4 w-4" />
+              </button>
+            )}
 
             {onTrackRemove && (
               <button

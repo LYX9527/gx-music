@@ -35,8 +35,8 @@ interface PlayerControlsProps {
   duration: number
   onSeek: (t: number) => void
   beatIntensity: number
-  viewMode: "discover" | "playing" | "playlist"
-  onToggleView: (mode: "discover" | "playing" | "playlist") => void
+  viewMode: "discover" | "playing" | "playlist" | "local"
+  onToggleView: (mode: "discover" | "playing" | "playlist" | "local") => void
 }
 
 function formatTime(seconds: number) {
