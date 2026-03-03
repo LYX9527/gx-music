@@ -1,8 +1,15 @@
 import type { Metadata, Viewport } from 'next'
+import localFont from 'next/font/local'
 import { Analytics } from '@vercel/analytics/next'
 import { Toaster } from 'sonner'
 import { ContextMenuBlocker } from '@/components/context-menu-blocker'
 import './globals.css'
+
+const zcoolKuaiLe = localFont({
+  src: '../public/fonts/ZCOOLKuaiLe-Regular.ttf',
+  variable: '--font-zcool',
+  display: 'swap',
+})
 export const viewport: Viewport = {
   themeColor: '#080810',
   userScalable: false,
@@ -38,7 +45,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="font-sans antialiased">
+      <body className={`font-sans antialiased ${zcoolKuaiLe.variable}`}>
         <ContextMenuBlocker />
         {children}
         <Analytics />
