@@ -14,6 +14,8 @@ import {
   ListMusic,
   Music,
   Mic2,
+  RefreshCw,
+  AlertCircle,
 } from "lucide-react"
 import { Slider } from "@/components/ui/slider"
 
@@ -37,6 +39,8 @@ interface PlayerControlsProps {
   beatIntensity: number
   viewMode: "discover" | "playing" | "playlist" | "local"
   onToggleView: (mode: "discover" | "playing" | "playlist" | "local") => void
+  playError?: string
+  onRetry?: () => void
 }
 
 function formatTime(seconds: number) {
@@ -67,6 +71,8 @@ export function PlayerControls({
   beatIntensity,
   viewMode,
   onToggleView,
+  playError,
+  onRetry,
 }: PlayerControlsProps) {
   const VolumeIcon = volume === 0 ? VolumeX : volume < 50 ? Volume1 : Volume2
   const modeConfig = PLAY_MODE_CONFIG[playMode]
@@ -166,17 +172,33 @@ export function PlayerControls({
           </button>
         </div>
 
-        <div className="flex w-full items-center gap-3">
-          <span className="w-10 text-right text-[10px] tabular-nums text-muted-foreground">{formatTime(currentTime)}</span>
-          <Slider
-            value={[currentTime]}
-            max={duration || 100}
-            step={1}
-            onValueChange={([v]) => onSeek(v)}
-            className="flex-1 [&_[data-slot=slider-track]]:h-1 [&_[data-slot=slider-track]]:bg-foreground/[0.08] [&_[data-slot=slider-range]]:bg-primary [&_[data-slot=slider-thumb]]:h-2.5 [&_[data-slot=slider-thumb]]:w-2.5 [&_[data-slot=slider-thumb]]:border-primary [&_[data-slot=slider-thumb]]:opacity-0 hover:[&_[data-slot=slider-thumb]]:opacity-100 focus-within:[&_[data-slot=slider-thumb]]:opacity-100 transition-opacity"
-          />
-          <span className="w-10 text-left text-[10px] tabular-nums text-muted-foreground">{formatTime(duration)}</span>
-        </div>
+        {playError ? (
+          <div className="flex w-full items-center justify-center gap-2">
+            <AlertCircle className="h-3.5 w-3.5 text-red-400 shrink-0" />
+            <span className="text-xs text-red-400/80 truncate">{playError}</span>
+            {onRetry && (
+              <button
+                onClick={onRetry}
+                className="flex shrink-0 items-center gap-1 rounded-md bg-white/[0.06] px-2.5 py-1 text-[11px] font-medium text-white/70 transition-colors hover:bg-white/[0.12] hover:text-white/90"
+              >
+                <RefreshCw className="h-3 w-3" />
+                重试
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="flex w-full items-center gap-3">
+            <span className="w-10 text-right text-[10px] tabular-nums text-muted-foreground">{formatTime(currentTime)}</span>
+            <Slider
+              value={[currentTime]}
+              max={duration || 100}
+              step={1}
+              onValueChange={([v]) => onSeek(v)}
+              className="flex-1 [&_[data-slot=slider-track]]:h-1 [&_[data-slot=slider-track]]:bg-foreground/[0.08] [&_[data-slot=slider-range]]:bg-primary [&_[data-slot=slider-thumb]]:h-2.5 [&_[data-slot=slider-thumb]]:w-2.5 [&_[data-slot=slider-thumb]]:border-primary [&_[data-slot=slider-thumb]]:opacity-0 hover:[&_[data-slot=slider-thumb]]:opacity-100 focus-within:[&_[data-slot=slider-thumb]]:opacity-100 transition-opacity"
+            />
+            <span className="w-10 text-left text-[10px] tabular-nums text-muted-foreground">{formatTime(duration)}</span>
+          </div>
+        )}
       </div>
 
       {/* Right: Volume & Playlist Toggle */}

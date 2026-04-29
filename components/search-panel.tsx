@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { Search, X, Play, ListPlus, Loader2, Music, CheckCheck, Download } from "lucide-react"
+import { Search, X, Play, ListPlus, Loader2, Music, CheckCheck, Download, RefreshCw } from "lucide-react"
 import { searchMusic, type OnlineSong } from "@/hooks/use-online-music"
 import { toast } from "sonner"
 
@@ -164,8 +164,17 @@ export function SearchPanel({
 
                 {/* Error */}
                 {errorMsg && (
-                    <div className="shrink-0 px-5 py-2 text-xs text-red-400/80">
-                        {errorMsg}
+                    <div className="shrink-0 px-5 py-2.5 flex items-center gap-2">
+                        <span className="text-xs text-red-400/80 flex-1">{errorMsg}</span>
+                        {errorMsg !== "未找到相关歌曲" && (
+                            <button
+                                onClick={doSearch}
+                                className="flex items-center gap-1 rounded-md bg-white/[0.06] px-2.5 py-1 text-[11px] font-medium text-white/70 transition-colors hover:bg-white/[0.12] hover:text-white/90"
+                            >
+                                <RefreshCw className="h-3 w-3" />
+                                重新搜索
+                            </button>
+                        )}
                     </div>
                 )}
 

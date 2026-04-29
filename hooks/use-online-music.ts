@@ -57,6 +57,24 @@ async function request(url: string, options: any = {}) {
     return fetch(url, options)
 }
 
+/**
+ * 自动重试包装器，网络不好时自动重试
+ */
+async function withRetry<T>(fn: () => Promise<T>, retries = 2, delayMs = 1000): Promise<T> {
+    let lastError: any
+    for (let i = 0; i <= retries; i++) {
+        try {
+            return await fn()
+        } catch (e) {
+            lastError = e
+            if (i < retries) {
+                await new Promise(r => setTimeout(r, delayMs))
+            }
+        }
+    }
+    throw lastError
+}
+
 function decodeHtmlEntities(text: string): string {
     if (!text) return text
     return text
@@ -74,7 +92,7 @@ export async function searchMusic(
     query: string,
     page = 1
 ): Promise<OnlineSong[]> {
-    try {
+    return withRetry(async () => {
         if (isTauri()) {
             const res = await request('https://u.y.qq.com/cgi-bin/musicu.fcg', {
                 method: "POST",
@@ -122,10 +140,7 @@ export async function searchMusic(
             }
             return []
         }
-    } catch (e) {
-        console.error("搜索失败", e)
-        return []
-    }
+    })
 }
 
 /**
@@ -135,7 +150,7 @@ export async function getMediaUrl(
     songmid: string,
     quality: "128k" | "320k" | "flac" = "128k"
 ): Promise<string | null> {
-    try {
+    return withRetry(async () => {
         if (isTauri()) {
             const res = await request(
                 `https://lxmusicapi.onrender.com/url/tx/${songmid}/${quality}`,
@@ -159,10 +174,7 @@ export async function getMediaUrl(
             }
             return null
         }
-    } catch (e) {
-        console.error("获取播放地址失败", e)
-        return null
-    }
+    })
 }
 
 /**

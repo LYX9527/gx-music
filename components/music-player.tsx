@@ -54,6 +54,7 @@ export function MusicPlayer() {
 
   const [volume, setVolume] = useState(100)
   const [playMode, setPlayMode] = useState<PlayMode>("list")
+  const [playError, setPlayError] = useState<string>("")
 
   // Which list is currently driving playback
   const [playSource, setPlaySource] = useState<"playlist" | "local">("playlist")
@@ -183,6 +184,7 @@ export function MusicPlayer() {
 
     setCurrentTrack(track)
     setLyricsData([]) // Clear old lyrics
+    setPlayError("") // Clear previous error
 
     try {
       // Update macOS Control Center Now Playing Metadata
@@ -213,7 +215,7 @@ export function MusicPlayer() {
       // 3. Fallback: Fetch streaming URL from online
       const url = await getMediaUrl(track.songmid!)
       if (!url) {
-        console.error("No play URL found")
+        setPlayError("获取播放地址失败，请检查网络后重试")
         return
       }
 
@@ -226,6 +228,7 @@ export function MusicPlayer() {
       player.play()
     } catch (err) {
       console.error("Play error:", err)
+      setPlayError("播放失败，网络可能不稳定，请重试")
     }
   }
 
@@ -289,6 +292,14 @@ export function MusicPlayer() {
     setVolume(v)
     player.setVolume(v)
   }
+
+  // Retry last failed track
+  const handleRetryPlay = useCallback(() => {
+    if (currentTrack) {
+      playTrack(currentTrack)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack])
 
   // Register Global Media Session next/prev actions
   useEffect(() => {
@@ -662,6 +673,8 @@ export function MusicPlayer() {
           beatIntensity={player.beatIntensity}
           viewMode={viewMode}
           onToggleView={(mode) => setViewMode(mode)}
+          playError={playError}
+          onRetry={handleRetryPlay}
         />
 
         <PlaylistSelector
