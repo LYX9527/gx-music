@@ -31,6 +31,11 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
     const sourceRef = useRef<MediaElementAudioSourceNode | null>(null)
     const gainRef = useRef<GainNode | null>(null)
     const animFrameRef = useRef<number>(0)
+    // Fallback ticker used while the document is hidden (RAF is throttled / paused
+    // by the browser when the window is hidden, but audio playback keeps going —
+    // this interval makes sure currentTime keeps flowing into React state so
+    // the menu-bar lyric/tray sync stays alive).
+    const hiddenTickerRef = useRef<ReturnType<typeof setInterval> | null>(null)
     const frequencyDataRef = useRef<Uint8Array | null>(null)
     const onEndedRef = useRef(options?.onEnded)
     const prevBeatRef = useRef(0)
@@ -61,8 +66,26 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
             setState((s) => ({ ...s, isLoading: false }))
         })
 
+        // The HTMLMediaElement `timeupdate` event fires every 200~250ms as long as
+        // the media is playing — including when the window is hidden. RAF gets
+        // throttled / paused on hidden windows, so this becomes our reliable
+        // baseline so currentTime keeps flowing into React state for the
+        // menu-bar lyric sync.
+        audio.addEventListener("timeupdate", () => {
+            // Skip while RAF is driving updates (visible & playing) — RAF gives
+            // smoother time + has the analyser data we need for beat intensity.
+            if (typeof document !== "undefined" && !document.hidden && !audio.paused) {
+                return
+            }
+            setState((s) => ({ ...s, currentTime: audio.currentTime }))
+        })
+
         return () => {
             cancelAnimationFrame(animFrameRef.current)
+            if (hiddenTickerRef.current) {
+                clearInterval(hiddenTickerRef.current)
+                hiddenTickerRef.current = null
+            }
             audio.pause()
             audio.removeAttribute("src")
             audio.load()
@@ -255,6 +278,49 @@ export function useAudioPlayer(options?: UseAudioPlayerOptions) {
             // The Next/Prev handlers need to be bound by the parent component (music-player) since useAudioPlayer doesn't manage the playlist queue
         }
     }, [play, pause])
+
+    // Hidden-window keep-alive: while the main window is hidden, RAF stops
+    // running. We swap to a setInterval that polls audio.currentTime at a low
+    // rate so React state keeps advancing — this is what lets the macOS status
+    // bar lyric refresh while the main window is collapsed to the menu bar.
+    useEffect(() => {
+        if (typeof document === "undefined") return
+
+        const startHiddenTicker = () => {
+            if (hiddenTickerRef.current) return
+            hiddenTickerRef.current = setInterval(() => {
+                const audio = audioRef.current
+                if (!audio || audio.paused) return
+                setState((s) => {
+                    if (Math.abs(s.currentTime - audio.currentTime) < 0.05) return s
+                    return { ...s, currentTime: audio.currentTime }
+                })
+            }, 250)
+        }
+        const stopHiddenTicker = () => {
+            if (hiddenTickerRef.current) {
+                clearInterval(hiddenTickerRef.current)
+                hiddenTickerRef.current = null
+            }
+        }
+
+        const onVisibility = () => {
+            if (document.hidden) {
+                startHiddenTicker()
+            } else {
+                stopHiddenTicker()
+            }
+        }
+
+        document.addEventListener("visibilitychange", onVisibility)
+        // Pick up the current state on mount (in case the window started hidden).
+        if (document.hidden) startHiddenTicker()
+
+        return () => {
+            document.removeEventListener("visibilitychange", onVisibility)
+            stopHiddenTicker()
+        }
+    }, [])
 
     return {
         ...state,

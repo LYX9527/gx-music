@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { Search, Compass, ListMusic, Music, FolderOpen, RefreshCw, FolderPlus, Plus, MoreHorizontal, Pencil, Trash2, X } from "lucide-react"
 import { MacOSWindowControls } from "./macos-window-controls"
 import { AlbumArtwork } from "./album-artwork"
@@ -15,6 +15,8 @@ import { useDownload } from "@/hooks/use-download"
 import { TrackList, type Track } from "./track-list"
 import { usePlaylistManager } from "@/hooks/use-playlist-manager"
 import { useLocalScan } from "@/hooks/use-local-scan"
+import { useTraySync } from "@/hooks/use-tray-sync"
+import { getActiveLyric, getScrollingLyricWindow } from "@/lib/lyrics-utils"
 
 import {
   ContextMenu,
@@ -308,6 +310,43 @@ export function MusicPlayer() {
       navigator.mediaSession.setActionHandler("nexttrack", handleNext)
     }
   }, [currentQueue, currentTrack, playMode]) // Added deps rather than handlePrev/handleNext directly based on the outer scope changes
+
+  // Active lyric for the mini-player popover (full text — popover does its
+  // own CSS truncation when the window is narrow).
+  const activeLyric = useMemo(
+    () => getActiveLyric(lyricsData, player.currentTime),
+    [lyricsData, player.currentTime]
+  )
+
+  // Sliding window of the active lyric for the macOS status bar title.
+  // We re-derive this every currentTime tick; useTraySync below dedupes on
+  // change so the IPC to set_tray_title only fires when the visible slice
+  // actually changes (~2 Hz typical for Chinese lyrics).
+  const trayLyricSlice = useMemo(
+    () =>
+      getScrollingLyricWindow(lyricsData, player.currentTime, {
+        windowSize: 18,
+        audioDuration: player.duration,
+      }),
+    [lyricsData, player.currentTime, player.duration]
+  )
+
+  // Bridge to tray icon + popover window (no-op outside Tauri).
+  useTraySync({
+    track: currentTrack,
+    isPlaying: player.isPlaying,
+    currentTime: player.currentTime,
+    duration: player.duration,
+    activeLyric,
+    trayLyricSlice,
+    beatIntensity: player.beatIntensity,
+    onPlayPause: player.togglePlay,
+    onPrev: handlePrev,
+    onNext: handleNext,
+    onSeek: player.seek,
+    onShowLyrics: () => setViewMode("playing"),
+    onShowPlaylist: () => setViewMode("playlist"),
+  })
 
   // Build rgba helpers for gradient layers
   const dominantRgba = (a: number) =>
