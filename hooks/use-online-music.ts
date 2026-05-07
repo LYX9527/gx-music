@@ -262,3 +262,10 @@ function parseLrc(lrcText: string): LyricLine[] {
     result.sort((a, b) => a.time - b.time)
     return result
 }
+
+// getMediaUrl("002ZGist4UyZoU").then(data=>{
+//     console.log(data)
+// })
+// searchMusic("兄弟（R&B微醺版）").then(data=>{
+//     console.log(data)
+// })

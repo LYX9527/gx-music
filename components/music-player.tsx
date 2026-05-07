@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { toast } from "sonner"
-import { Search, Compass, ListMusic, Music, FolderOpen, RefreshCw, FolderPlus, Plus, MoreHorizontal, Pencil, Trash2, X } from "lucide-react"
+import { Search, Compass, ListMusic, Music, FolderOpen, RefreshCw, FolderPlus, Plus, MoreHorizontal, Pencil, Trash2, X, Play, Pause, Loader2, ChevronDown, ChevronUp } from "lucide-react"
 import { MacOSWindowControls } from "./macos-window-controls"
 import { AlbumArtwork } from "./album-artwork"
 import { AudioVisualizer } from "./audio-visualizer"
@@ -20,6 +20,7 @@ import { useTraySync } from "@/hooks/use-tray-sync"
 import { useHotkeys } from "@/hooks/use-hotkeys"
 import { getActiveLyric, getScrollingLyricWindow } from "@/lib/lyrics-utils"
 import { AudioStateContext, BeatPulseOverlay } from "./audio-state-context"
+import { useRecommend, type ToplistSong, type ToplistData, type ToplistGroup, type RecommendPlaylist, type PlaylistDetail, formatListenNum } from "@/hooks/use-recommend"
 
 import {
   ContextMenu,
@@ -41,6 +42,42 @@ const PLAYBACK_STATE_KEY = "muse_playback_state"
 
 type ViewMode = "discover" | "playing" | "playlist" | "local"
 type ImagePalette = { dominant: string; secondary: string; muted: string }
+
+/**
+ * Invisible sentinel element placed at the bottom of a scrollable toplist.
+ * When it enters the viewport (via IntersectionObserver), it calls
+ * `onLoadMore(topId)` to fetch the next page of songs.
+ */
+function ToplistScrollSentinel({
+  topId,
+  isLoading,
+  onLoadMore,
+}: {
+  topId: number
+  isLoading: boolean
+  onLoadMore: (topId: number) => void
+}) {
+  const sentinelRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && !isLoading) {
+          onLoadMore(topId)
+        }
+      },
+      { rootMargin: "100px" }
+    )
+
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [topId, isLoading, onLoadMore])
+
+  return <div ref={sentinelRef} className="h-1 w-full shrink-0" aria-hidden />
+}
 
 export function MusicPlayer() {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null)
@@ -78,6 +115,122 @@ export function MusicPlayer() {
   const localScan = useLocalScan()
 
   const currentQueue = playSource === "local" ? localScan.localTracks : playlistManager.activePlaylist.tracks
+
+  // Recommend / Discover
+  const recommend = useRecommend()
+  // Track which toplist cards are expanded to show all songs
+  const [expandedToplists, setExpandedToplists] = useState<Set<number>>(new Set())
+  const toggleToplistExpand = useCallback((topId: number) => {
+    setExpandedToplists(prev => {
+      const next = new Set(prev)
+      if (next.has(topId)) {
+        next.delete(topId)
+      } else {
+        next.add(topId)
+        // Load full song detail on first expand
+        recommend.loadDetail(topId)
+      }
+      return next
+    })
+  }, [recommend.loadDetail])
+
+  const handlePlayToplistSong = useCallback((song: ToplistSong) => {
+    const onlineSong: OnlineSong = {
+      id: song.id,
+      songmid: song.songmid,
+      title: song.title,
+      artist: song.artist,
+      album: song.album,
+      albummid: song.albumMid,
+      coverUrl: song.cover,
+      duration: song.duration,
+    }
+    handlePlayOnlineSong(onlineSong)
+  }, [])  // handlePlayOnlineSong is stable enough via closure
+
+  // Track which playlist cards are expanded
+  const [expandedPlaylists, setExpandedPlaylists] = useState<Set<number>>(new Set())
+  const togglePlaylistExpand = useCallback((contentId: number) => {
+    setExpandedPlaylists(prev => {
+      const next = new Set(prev)
+      if (next.has(contentId)) {
+        next.delete(contentId)
+      } else {
+        next.add(contentId)
+        recommend.loadPlaylistDetail(contentId)
+      }
+      return next
+    })
+  }, [recommend.loadPlaylistDetail])
+
+  /** Play the entire recommended playlist: load songs → create sidebar playlist → play first song. */
+  const handlePlayEntirePlaylist = useCallback(async (pl: RecommendPlaylist) => {
+    try {
+      // Load songs if not yet loaded
+      let detail = recommend.playlistDetails.get(pl.contentId)
+      if (!detail?.detailLoaded) {
+        await recommend.loadPlaylistDetail(pl.contentId)
+        // After await, we need to re-read from the latest state.
+        // But since loadPlaylistDetail updates state async, we fetch directly here.
+        const { fetchPlaylistSongs } = await import("@/hooks/use-recommend")
+        const page = await fetchPlaylistSongs(pl.contentId, 0, 100)
+        // Create tracks from the fetched songs
+        const tracks: Track[] = page.songs.map(song => ({
+          id: song.songmid,
+          songmid: song.songmid,
+          title: song.title,
+          artist: song.artist,
+          album: song.album || "Unknown Album",
+          cover: song.cover || "",
+          duration: song.duration,
+        }))
+
+        if (tracks.length === 0) {
+          toast.error("歌单暂无可播放歌曲")
+          return
+        }
+
+        // Create a new playlist in the sidebar
+        const newPlaylist = playlistManager.createPlaylist(pl.title)
+        tracks.forEach(t => playlistManager.addTrackToPlaylist(newPlaylist.id, t))
+        playlistManager.setActivePlaylist(newPlaylist.id)
+        setPlaySource("playlist")
+
+        // Play the first track
+        playTrack(tracks[0])
+        setViewMode("playing")
+        toast.success(`已创建歌单「${pl.title}」并开始播放`)
+      } else {
+        // Detail already loaded — use cached songs
+        const tracks: Track[] = detail.songs.map(song => ({
+          id: song.songmid,
+          songmid: song.songmid,
+          title: song.title,
+          artist: song.artist,
+          album: song.album || "Unknown Album",
+          cover: song.cover || "",
+          duration: song.duration,
+        }))
+
+        if (tracks.length === 0) {
+          toast.error("歌单暂无可播放歌曲")
+          return
+        }
+
+        const newPlaylist = playlistManager.createPlaylist(pl.title)
+        tracks.forEach(t => playlistManager.addTrackToPlaylist(newPlaylist.id, t))
+        playlistManager.setActivePlaylist(newPlaylist.id)
+        setPlaySource("playlist")
+
+        playTrack(tracks[0])
+        setViewMode("playing")
+        toast.success(`已创建歌单「${pl.title}」并开始播放`)
+      }
+    } catch (e) {
+      console.error("Failed to play entire playlist:", e)
+      toast.error("播放歌单失败")
+    }
+  }, [recommend.playlistDetails, recommend.loadPlaylistDetail, playlistManager])
 
   // Load playlist from localStorage on mount
   // (Removed old playlist sync as we use playlistManager now)
@@ -763,21 +916,462 @@ export function MusicPlayer() {
               className="absolute inset-0 overflow-y-auto"
               style={viewMode === "discover" ? viewActiveStyle : viewInactiveStyle}
             >
-              <div className="flex flex-col items-center justify-center p-8 min-h-full py-20">
-                <div className="flex h-24 w-24 items-center justify-center rounded-[2rem] bg-primary/20 mb-6 shadow-2xl shadow-primary/10">
-                  <Compass className="h-10 w-10 text-primary" />
+              <div className="p-8 pb-28 max-w-5xl mx-auto">
+                {/* Header */}
+                <div className="flex items-end justify-between mb-8">
+                  <div>
+                    <h2 className="text-[28px] font-bold tracking-tight text-white mb-1">发现音乐</h2>
+                    <p className="text-[13px] text-muted-foreground">为你精选热门榜单，发现好音乐</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setShowSearch(true)}
+                      className="flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground shadow-[0_0_16px_rgba(200,80,60,0.25)] transition-all duration-150 hover:scale-[1.03] active:scale-[0.97]"
+                    >
+                      <Search className="h-3.5 w-3.5" />
+                      搜索
+                    </button>
+                    <button
+                      onClick={recommend.refresh}
+                      disabled={recommend.isLoading}
+                      className="flex items-center gap-1.5 rounded-full bg-foreground/[0.06] px-3 py-2 text-xs font-medium text-foreground/80 transition-all duration-150 hover:bg-foreground/[0.12] active:scale-[0.96] disabled:opacity-50"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${recommend.isLoading ? "animate-spin" : ""}`} />
+                      刷新
+                    </button>
+                  </div>
                 </div>
-                <h2 className="text-3xl font-bold tracking-tight text-white mb-4">发现每日好音乐</h2>
-                <p className="max-w-md text-center text-muted-foreground mb-8 text-[15px] leading-relaxed">
-                  在这里探寻海量曲库，寻找最适合你现在心情的那首歌。<br />点击下方按钮开启你的音乐之旅。
-                </p>
-                <button
-                  onClick={() => setShowSearch(true)}
-                  className="flex items-center gap-2 rounded-full bg-primary px-8 py-3.5 text-sm font-semibold text-primary-foreground shadow-[0_0_20px_rgba(200,80,60,0.3)] transition-transform hover:scale-105 active:scale-95"
-                >
-                  <Search className="h-4 w-4" />
-                  搜索全网音乐
-                </button>
+
+                {/* Error */}
+                {recommend.error && (
+                  <div className="mb-6 rounded-xl bg-red-500/10 border border-red-500/20 px-4 py-3 text-sm text-red-400">
+                    {recommend.error}
+                  </div>
+                )}
+
+                {/* Loading Skeleton */}
+                {recommend.isLoading && recommend.groups.length === 0 && (
+                  <div className="space-y-8">
+                    {[1, 2].map(gi => (
+                      <div key={gi}>
+                        <div className="h-5 w-20 rounded bg-white/[0.06] mb-4 animate-pulse" />
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {[1, 2, 3, 4].map(i => (
+                            <div key={i} className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 animate-pulse">
+                              <div className="flex gap-3 mb-3">
+                                <div className="h-14 w-14 rounded-xl bg-white/[0.06]" />
+                                <div className="flex-1 flex flex-col justify-center gap-2">
+                                  <div className="h-4 w-20 rounded bg-white/[0.06]" />
+                                  <div className="h-3 w-14 rounded bg-white/[0.04]" />
+                                </div>
+                              </div>
+                              {[1, 2, 3].map(j => (
+                                <div key={j} className="flex items-center gap-2 py-1.5">
+                                  <div className="h-3 w-4 rounded bg-white/[0.04]" />
+                                  <div className="h-3 flex-1 rounded bg-white/[0.05]" />
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Grouped Toplists */}
+                {recommend.groups.length > 0 && (
+                  <div className="space-y-10">
+                    {recommend.groups.map(group => (
+                      <div key={group.groupId}>
+                        {/* Group Header */}
+                        <h3 className="text-[15px] font-bold text-white/90 mb-4 pl-1 flex items-center gap-2">
+                          <span className="w-1 h-4 rounded-full bg-primary inline-block" />
+                          {group.groupName}
+                        </h3>
+
+                        {/* Toplist Cards Grid */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {group.toplists.map(toplist => {
+                            const isExpanded = expandedToplists.has(toplist.topId)
+                            const isToplistLoading = recommend.loadingIds.has(toplist.topId)
+                            const isExhausted = recommend.exhaustedIds.has(toplist.topId)
+                            const hasDetail = toplist.detailLoaded
+                            const visibleSongs = isExpanded
+                              ? toplist.songs
+                              : hasDetail
+                                ? toplist.songs.slice(0, 5)
+                                : []
+
+                            return (
+                              <div
+                                key={toplist.topId}
+                                className="group/card rounded-2xl bg-white/[0.03] border border-white/[0.06] overflow-hidden transition-all duration-300 hover:bg-white/[0.05] hover:border-white/[0.1] hover:shadow-[0_8px_32px_rgba(0,0,0,0.3)]"
+                              >
+                                {/* Card Header */}
+                                <div className="flex items-center gap-3 p-4 pb-2">
+                                  <div className="h-12 w-12 shrink-0 rounded-lg overflow-hidden bg-white/[0.06] shadow-md">
+                                    {toplist.headerPic ? (
+                                      <img
+                                        src={toplist.headerPic}
+                                        alt={toplist.title}
+                                        className="h-full w-full object-cover"
+                                        loading="lazy"
+                                      />
+                                    ) : (
+                                      <div className="h-full w-full flex items-center justify-center text-white/20">
+                                        <Music className="h-5 w-5" />
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <h4 className="text-sm font-bold text-white truncate">{toplist.title}</h4>
+                                    <div className="flex items-center gap-2 mt-0.5">
+                                      {toplist.updateTime && (
+                                        <span className="text-[10px] text-muted-foreground">{toplist.updateTime}</span>
+                                      )}
+                                      {toplist.listenNum > 0 && (
+                                        <span className="text-[10px] text-muted-foreground/50">
+                                          {formatListenNum(toplist.listenNum)} 次播放
+                                        </span>
+                                      )}
+                                    </div>
+                                    {isExpanded && hasDetail && (
+                                      <p className="text-[10px] text-muted-foreground/40 mt-0.5">
+                                        {toplist.songs.length} / {toplist.totalNum} 首
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Preview songs (before detail is loaded) */}
+                                {!isExpanded && !hasDetail && toplist.previewSongs.length > 0 && (
+                                  <div className="px-3 pb-1">
+                                    {toplist.previewSongs.map((ps, idx) => (
+                                      <div
+                                        key={ps.songId}
+                                        className="flex items-center gap-2 px-2 py-[5px] rounded-md"
+                                      >
+                                        <span className={`w-4 text-right text-[11px] font-bold tabular-nums shrink-0 ${
+                                          idx < 3 ? "text-primary" : "text-muted-foreground/50"
+                                        }`}>
+                                          {idx + 1}
+                                        </span>
+                                        <span className="text-[12px] text-white/70 truncate flex-1">{ps.title}</span>
+                                        <span className="text-[11px] text-muted-foreground/40 truncate max-w-[80px]">{ps.artist}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {/* Full song list (after detail loaded) */}
+                                {(isExpanded || (hasDetail && !isExpanded)) && (
+                                  <div
+                                    className={`px-3 pb-2 ${
+                                      isExpanded ? "overflow-y-auto" : ""
+                                    }`}
+                                    style={isExpanded ? { maxHeight: "380px" } : undefined}
+                                  >
+                                    {/* Detail loading state */}
+                                    {isToplistLoading && !hasDetail && (
+                                      <div className="flex items-center justify-center py-4">
+                                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground/50" />
+                                        <span className="ml-2 text-[11px] text-muted-foreground/50">加载中...</span>
+                                      </div>
+                                    )}
+
+                                    {visibleSongs.map((song, idx) => (
+                                      <div
+                                        key={`${song.id}-${idx}`}
+                                        className="group/row flex items-center gap-2.5 rounded-lg px-2 py-[6px] transition-colors duration-150 hover:bg-white/[0.06] cursor-pointer"
+                                        onClick={() => handlePlayToplistSong(song)}
+                                      >
+                                        <span className={`w-5 text-right text-xs font-bold tabular-nums shrink-0 ${
+                                          idx < 3 ? "text-primary" : "text-muted-foreground/50"
+                                        }`}>
+                                          {idx + 1}
+                                        </span>
+
+                                        <div className="relative h-8 w-8 shrink-0 rounded-md overflow-hidden bg-white/[0.04]">
+                                          {song.cover ? (
+                                            <img src={song.cover} alt="" className="h-full w-full object-cover" loading="lazy" />
+                                          ) : (
+                                            <div className="h-full w-full flex items-center justify-center text-white/10">
+                                              <Music className="h-3 w-3" />
+                                            </div>
+                                          )}
+                                          <div className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover/row:opacity-100 transition-opacity duration-150">
+                                            <Play className="h-3 w-3 text-white" fill="currentColor" />
+                                          </div>
+                                        </div>
+
+                                        <div className="flex-1 min-w-0 flex flex-col">
+                                          <span className="text-[13px] font-medium text-white/90 truncate leading-tight">{song.title}</span>
+                                          <span className="text-[11px] text-muted-foreground/60 truncate leading-tight">{song.artist}</span>
+                                        </div>
+
+                                        <span className="text-[11px] text-muted-foreground/40 tabular-nums shrink-0 group-hover/row:hidden">{song.duration}</span>
+
+                                        <div className="hidden group-hover/row:flex items-center gap-0.5 shrink-0">
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation()
+                                              handleAddToPlaylistPrompt({
+                                                id: song.songmid,
+                                                songmid: song.songmid,
+                                                title: song.title,
+                                                artist: song.artist,
+                                                album: song.album || "Unknown Album",
+                                                cover: song.cover || "",
+                                                duration: song.duration,
+                                              })
+                                            }}
+                                            className="rounded-full p-1 text-muted-foreground/60 hover:text-white hover:bg-white/[0.1] transition-colors"
+                                            title="添加到歌单"
+                                          >
+                                            <Plus className="h-3.5 w-3.5" />
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ))}
+
+                                    {/* Infinite scroll sentinel */}
+                                    {isExpanded && hasDetail && !isExhausted && (
+                                      <ToplistScrollSentinel
+                                        topId={toplist.topId}
+                                        isLoading={isToplistLoading}
+                                        onLoadMore={recommend.loadMore}
+                                      />
+                                    )}
+
+                                    {/* Loading more spinner */}
+                                    {isToplistLoading && hasDetail && (
+                                      <div className="flex items-center justify-center py-3">
+                                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground/50" />
+                                        <span className="ml-2 text-[11px] text-muted-foreground/50">加载中...</span>
+                                      </div>
+                                    )}
+
+                                    {/* Exhausted hint */}
+                                    {isExpanded && isExhausted && toplist.songs.length > 10 && (
+                                      <div className="py-2 text-center text-[11px] text-muted-foreground/30">
+                                        — 全部 {toplist.songs.length} 首 —
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* Expand / Collapse Toggle */}
+                                <div className="px-3 pb-2">
+                                  <button
+                                    onClick={() => toggleToplistExpand(toplist.topId)}
+                                    disabled={isToplistLoading && !hasDetail}
+                                    className="flex items-center justify-center gap-1 w-full py-1.5 rounded-lg text-[11px] font-medium text-muted-foreground/60 hover:text-white/70 hover:bg-white/[0.04] transition-colors duration-150 disabled:opacity-40"
+                                  >
+                                    {isToplistLoading && !hasDetail ? (
+                                      <><Loader2 className="h-3 w-3 animate-spin" />加载中</>
+                                    ) : isExpanded ? (
+                                      <><ChevronUp className="h-3 w-3" />收起</>
+                                    ) : (
+                                      <><ChevronDown className="h-3 w-3" />展开 {toplist.totalNum} 首</>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* ════════════════════════════════════════════════ */}
+                {/* Recommended Playlists Section                    */}
+                {/* ════════════════════════════════════════════════ */}
+                {recommend.playlists.length > 0 && (
+                  <div className="mt-10">
+                    <h3 className="text-[15px] font-bold text-white/90 mb-4 pl-1 flex items-center gap-2">
+                      <span className="w-1 h-4 rounded-full bg-emerald-400 inline-block" />
+                      推荐歌单
+                    </h3>
+
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                      {recommend.playlists.map(pl => {
+                        const isExpanded = expandedPlaylists.has(pl.contentId)
+                        const plKey = -pl.contentId
+                        const isPlLoading = recommend.loadingIds.has(plKey)
+                        const isPlExhausted = recommend.exhaustedIds.has(plKey)
+                        const detail = recommend.playlistDetails.get(pl.contentId)
+                        const hasDetail = detail?.detailLoaded ?? false
+
+                        return (
+                          <div
+                            key={pl.contentId}
+                            className={`rounded-2xl bg-white/[0.03] border border-white/[0.06] overflow-hidden transition-all duration-300 hover:bg-white/[0.05] hover:border-white/[0.1] hover:shadow-[0_8px_32px_rgba(0,0,0,0.3)] ${
+                              isExpanded ? "col-span-2 md:col-span-3" : ""
+                            }`}
+                          >
+                            {/* Playlist Card */}
+                            <div
+                              className="cursor-pointer"
+                              onClick={() => togglePlaylistExpand(pl.contentId)}
+                            >
+                              {!isExpanded && (
+                                <div className="aspect-square relative overflow-hidden rounded-t-2xl group/cover">
+                                  <img
+                                    src={pl.cover}
+                                    alt={pl.title}
+                                    className="h-full w-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
+                                    loading="lazy"
+                                  />
+                                  {/* Center play button */}
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      handlePlayEntirePlaylist(pl)
+                                    }}
+                                    className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/cover:opacity-100 transition-opacity duration-200"
+                                  >
+                                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/90 shadow-[0_4px_20px_rgba(16,185,129,0.4)] backdrop-blur-sm transition-transform duration-150 hover:scale-110 active:scale-95">
+                                      <Play className="h-5 w-5 text-white ml-0.5" fill="currentColor" />
+                                    </div>
+                                  </button>
+                                  {/* Listen count badge */}
+                                  <div className="absolute top-2 right-2 flex items-center gap-1 rounded-full bg-black/50 backdrop-blur-sm px-2 py-0.5">
+                                    <Play className="h-2.5 w-2.5 text-white/80" fill="currentColor" />
+                                    <span className="text-[10px] text-white/80 font-medium">
+                                      {formatListenNum(pl.listenNum)}
+                                    </span>
+                                  </div>
+                                  {/* Recommend tag */}
+                                  {pl.rcmdTemplate && (
+                                    <div className="absolute bottom-2 left-2 rounded-md bg-primary/80 backdrop-blur-sm px-1.5 py-0.5">
+                                      <span className="text-[9px] text-white font-medium">{pl.rcmdTemplate}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                              <div className={isExpanded ? "flex items-center gap-3 p-4 pb-2" : "p-3 pt-2"}>
+                                {isExpanded && (
+                                  <div className="h-16 w-16 shrink-0 rounded-xl overflow-hidden shadow-lg">
+                                    <img src={pl.cover} alt="" className="h-full w-full object-cover" />
+                                  </div>
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <p className={`font-semibold text-white/90 truncate ${isExpanded ? "text-sm" : "text-[12px] leading-tight"}`}>
+                                    {pl.title}
+                                  </p>
+                                  <p className="text-[10px] text-muted-foreground/50 truncate mt-0.5">
+                                    {pl.creator}
+                                    {isExpanded && hasDetail && (
+                                      <span className="ml-2">{detail!.songs.length} / {detail!.totalNum} 首</span>
+                                    )}
+                                  </p>
+                                </div>
+                                {isExpanded && (
+                                  <ChevronUp className="h-4 w-4 text-muted-foreground/40 shrink-0" />
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Expanded song list */}
+                            {isExpanded && (
+                              <div
+                                className="px-3 pb-2 overflow-y-auto"
+                                style={{ maxHeight: "400px" }}
+                              >
+                                {isPlLoading && !hasDetail && (
+                                  <div className="flex items-center justify-center py-6">
+                                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground/50" />
+                                    <span className="ml-2 text-[11px] text-muted-foreground/50">加载中...</span>
+                                  </div>
+                                )}
+
+                                {hasDetail && detail!.songs.map((song, idx) => (
+                                  <div
+                                    key={`${song.id}-${idx}`}
+                                    className="group/row flex items-center gap-2.5 rounded-lg px-2 py-[6px] transition-colors duration-150 hover:bg-white/[0.06] cursor-pointer"
+                                    onClick={(e) => { e.stopPropagation(); handlePlayToplistSong(song) }}
+                                  >
+                                    <span className={`w-5 text-right text-xs font-bold tabular-nums shrink-0 ${
+                                      idx < 3 ? "text-emerald-400" : "text-muted-foreground/50"
+                                    }`}>
+                                      {idx + 1}
+                                    </span>
+
+                                    <div className="relative h-8 w-8 shrink-0 rounded-md overflow-hidden bg-white/[0.04]">
+                                      {song.cover ? (
+                                        <img src={song.cover} alt="" className="h-full w-full object-cover" loading="lazy" />
+                                      ) : (
+                                        <div className="h-full w-full flex items-center justify-center text-white/10">
+                                          <Music className="h-3 w-3" />
+                                        </div>
+                                      )}
+                                      <div className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover/row:opacity-100 transition-opacity duration-150">
+                                        <Play className="h-3 w-3 text-white" fill="currentColor" />
+                                      </div>
+                                    </div>
+
+                                    <div className="flex-1 min-w-0 flex flex-col">
+                                      <span className="text-[13px] font-medium text-white/90 truncate leading-tight">{song.title}</span>
+                                      <span className="text-[11px] text-muted-foreground/60 truncate leading-tight">{song.artist}</span>
+                                    </div>
+
+                                    <span className="text-[11px] text-muted-foreground/40 tabular-nums shrink-0 group-hover/row:hidden">{song.duration}</span>
+
+                                    <div className="hidden group-hover/row:flex items-center gap-0.5 shrink-0">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation()
+                                          handleAddToPlaylistPrompt({
+                                            id: song.songmid,
+                                            songmid: song.songmid,
+                                            title: song.title,
+                                            artist: song.artist,
+                                            album: song.album || "Unknown Album",
+                                            cover: song.cover || "",
+                                            duration: song.duration,
+                                          })
+                                        }}
+                                        className="rounded-full p-1 text-muted-foreground/60 hover:text-white hover:bg-white/[0.1] transition-colors"
+                                        title="添加到歌单"
+                                      >
+                                        <Plus className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+
+                                {/* Infinite scroll sentinel */}
+                                {hasDetail && !isPlExhausted && (
+                                  <ToplistScrollSentinel
+                                    topId={plKey}
+                                    isLoading={isPlLoading}
+                                    onLoadMore={() => recommend.loadMorePlaylistSongs(pl.contentId)}
+                                  />
+                                )}
+
+                                {isPlLoading && hasDetail && (
+                                  <div className="flex items-center justify-center py-3">
+                                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground/50" />
+                                    <span className="ml-2 text-[11px] text-muted-foreground/50">加载中...</span>
+                                  </div>
+                                )}
+
+                                {isPlExhausted && detail!.songs.length > 10 && (
+                                  <div className="py-2 text-center text-[11px] text-muted-foreground/30">
+                                    — 全部 {detail!.songs.length} 首 —
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
