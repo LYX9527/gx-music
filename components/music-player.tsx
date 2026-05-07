@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react"
+import { toast } from "sonner"
 import { Search, Compass, ListMusic, Music, FolderOpen, RefreshCw, FolderPlus, Plus, MoreHorizontal, Pencil, Trash2, X } from "lucide-react"
 import { MacOSWindowControls } from "./macos-window-controls"
 import { AlbumArtwork } from "./album-artwork"
@@ -16,7 +17,9 @@ import { TrackList, type Track } from "./track-list"
 import { usePlaylistManager } from "@/hooks/use-playlist-manager"
 import { useLocalScan } from "@/hooks/use-local-scan"
 import { useTraySync } from "@/hooks/use-tray-sync"
+import { useHotkeys } from "@/hooks/use-hotkeys"
 import { getActiveLyric, getScrollingLyricWindow } from "@/lib/lyrics-utils"
+import { AudioStateContext, BeatPulseOverlay } from "./audio-state-context"
 
 import {
   ContextMenu,
@@ -37,6 +40,7 @@ import { PlaylistSelector } from "./playlist-selector"
 const PLAYBACK_STATE_KEY = "muse_playback_state"
 
 type ViewMode = "discover" | "playing" | "playlist" | "local"
+type ImagePalette = { dominant: string; secondary: string; muted: string }
 
 export function MusicPlayer() {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null)
@@ -57,6 +61,13 @@ export function MusicPlayer() {
   const [volume, setVolume] = useState(100)
   const [playMode, setPlayMode] = useState<PlayMode>("list")
   const [playError, setPlayError] = useState<string>("")
+  /**
+   * True from the moment the user clicks a track until audio actually starts
+   * (or fails). Distinct from `player.isLoading` — that flips only when
+   * `loadUrl` is called, but we want the spinner from the click instant
+   * (before the network resolves the streaming URL).
+   */
+  const [isPreparingPlayback, setIsPreparingPlayback] = useState(false)
 
   // Which list is currently driving playback
   const [playSource, setPlaySource] = useState<"playlist" | "local">("playlist")
@@ -134,6 +145,7 @@ export function MusicPlayer() {
       }
     } catch (e) {
       console.error("Failed to restore playback state", e)
+      toast.error("恢复上次播放状态失败")
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -175,62 +187,107 @@ export function MusicPlayer() {
   const handleDownload = useCallback(async (track: Track) => {
     const ok = await download(track)
     if (ok) {
-      console.log(`下载成功: ${track.title}`)
+      toast.success(`已下载：${track.title}`)
     } else {
-      console.error(`下载失败: ${track.title}`)
+      toast.error(`下载失败：${track.title}`)
     }
   }, [download])
+
+  // Track id of the most recent playTrack invocation; used to ignore stale
+  // resolutions when the user rapidly clicks between tracks.
+  const loadingTrackRef = useRef<string | number | null>(null)
 
   const playTrack = async (track: Track) => {
     if (!track.songmid && !track.localUrl) return
 
+    // Mark this track as the in-flight one — any earlier playTrack still
+    // running will bail out at its next checkpoint.
+    loadingTrackRef.current = track.id
+
     setCurrentTrack(track)
     setLyricsData([]) // Clear old lyrics
     setPlayError("") // Clear previous error
+    setIsPreparingPlayback(true)
+
+    const isStale = () => loadingTrackRef.current !== track.id
+    const finish = () => {
+      if (!isStale()) setIsPreparingPlayback(false)
+    }
 
     try {
-      // Update macOS Control Center Now Playing Metadata
+      // Update macOS Control Center Now Playing Metadata immediately (does
+      // not wait on network) so the system control center reflects the user's
+      // intent before audio actually loads.
       player.updateMediaSession(track)
 
-      // 1. Local-only track from useLocalScan (has no songmid)
+      // Path 1 — local-only file from useLocalScan (no songmid). Direct.
       if (track.localUrl && !track.songmid) {
         await player.loadUrl(track.localUrl)
+        if (isStale()) return
         player.setVolume(volume)
         player.play()
+        finish()
         return
       }
 
-      // 2. Try local file first (downloaded offline with songmid)
-      const localUrl = await getLocalUrl(track.songmid!)
-      if (localUrl) {
-        // Load local lyrics
-        getLocalLyrics(track.songmid!).then((lyrics) => {
-          if (lyrics) setLyricsData(lyrics)
-          else getLyric(track.songmid!).then(setLyricsData)
-        })
-        await player.loadUrl(localUrl)
-        player.setVolume(volume)
-        player.play()
+      const songmid = track.songmid!
+
+      // Path 2 — online or downloaded online track. Fan out three independent
+      // probes concurrently:
+      //   • localUrl     — disk lookup for a previously downloaded copy
+      //   • mediaUrl     — network call to resolve the streaming URL
+      //   • lyrics       — local lyrics + online lyrics fallback
+      // The audio path uses whichever URL is available first (preferring local
+      // since playback starts instantly and survives offline). Lyrics are
+      // applied as soon as they arrive — they don't gate audio.
+      const localUrlPromise = getLocalUrl(songmid).catch(() => null)
+      const mediaUrlPromise = getMediaUrl(songmid).catch(() => null)
+
+      // Lyrics in parallel: prefer local, fall back to online.
+      ;(async () => {
+        try {
+          const localLyrics = await getLocalLyrics(songmid).catch(() => null)
+          if (isStale()) return
+          if (localLyrics && localLyrics.length) {
+            setLyricsData(localLyrics)
+            return
+          }
+          const online = await getLyric(songmid).catch(() => null)
+          if (isStale()) return
+          if (online) setLyricsData(online)
+        } catch {
+          // Lyrics are non-essential; swallow.
+        }
+      })()
+
+      // Resolve audio URL: local wins; otherwise wait for online.
+      let audioUrl = await localUrlPromise
+      if (!audioUrl) {
+        audioUrl = await mediaUrlPromise
+      }
+      if (isStale()) return
+
+      if (!audioUrl) {
+        const msg = "获取播放地址失败，请检查网络后重试"
+        setPlayError(msg)
+        toast.error(msg, { description: track.title })
+        finish()
         return
       }
 
-      // 3. Fallback: Fetch streaming URL from online
-      const url = await getMediaUrl(track.songmid!)
-      if (!url) {
-        setPlayError("获取播放地址失败，请检查网络后重试")
-        return
-      }
+      await player.loadUrl(audioUrl)
+      if (isStale()) return
 
-      // 4. Fetch lyrics concurrently with audio loading
-      getLyric(track.songmid!).then(setLyricsData)
-
-      // 5. Play audio
-      await player.loadUrl(url)
       player.setVolume(volume)
       player.play()
+      finish()
     } catch (err) {
+      if (isStale()) return
       console.error("Play error:", err)
-      setPlayError("播放失败，网络可能不稳定，请重试")
+      const msg = "播放失败，网络可能不稳定，请重试"
+      setPlayError(msg)
+      toast.error(msg, { description: track.title })
+      finish()
     }
   }
 
@@ -303,6 +360,56 @@ export function MusicPlayer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTrack])
 
+  // Stable callbacks for the memoized PlayerControls. The actual handler
+  // logic still depends on closure state (currentTrack/currentQueue/etc),
+  // so we route everything through latestRef → fixed callback. PlayerControls
+  // sees the same function reference every render and memo can do its job.
+  const latestHandlers = useRef({
+    handlePrev,
+    handleNext,
+    handleRetryPlay,
+    setViewMode,
+    setPlayMode,
+    setVolume,
+    seek: player.seek,
+    togglePlay: player.togglePlay,
+    setPlayerVolume: player.setVolume,
+  })
+  latestHandlers.current = {
+    handlePrev,
+    handleNext,
+    handleRetryPlay,
+    setViewMode,
+    setPlayMode,
+    setVolume,
+    seek: player.seek,
+    togglePlay: player.togglePlay,
+    setPlayerVolume: player.setVolume,
+  }
+
+  const stablePrev = useCallback(() => latestHandlers.current.handlePrev(), [])
+  const stableNext = useCallback(() => latestHandlers.current.handleNext(), [])
+  const stableRetry = useCallback(() => latestHandlers.current.handleRetryPlay(), [])
+  const stablePlayPause = useCallback(() => latestHandlers.current.togglePlay(), [])
+  const stableSeek = useCallback(
+    (t: number) => latestHandlers.current.seek(t),
+    []
+  )
+  const stableToggleView = useCallback(
+    (mode: "discover" | "playing" | "playlist" | "local") =>
+      latestHandlers.current.setViewMode(mode),
+    []
+  )
+  const stableModeChange = useCallback(() => {
+    latestHandlers.current.setPlayMode((prev) =>
+      prev === "list" ? "single" : prev === "single" ? "shuffle" : "list"
+    )
+  }, [])
+  const stableVolumeChange = useCallback((v: number) => {
+    latestHandlers.current.setVolume(v)
+    latestHandlers.current.setPlayerVolume(v)
+  }, [])
+
   // Register Global Media Session next/prev actions
   useEffect(() => {
     if ("mediaSession" in navigator) {
@@ -310,6 +417,29 @@ export function MusicPlayer() {
       navigator.mediaSession.setActionHandler("nexttrack", handleNext)
     }
   }, [currentQueue, currentTrack, playMode]) // Added deps rather than handlePrev/handleNext directly based on the outer scope changes
+
+  // Volume that was active before mute, so we can restore it on unmute.
+  const preMuteVolumeRef = useRef(volume)
+  useEffect(() => {
+    if (volume > 0) preMuteVolumeRef.current = volume
+  }, [volume])
+
+  useHotkeys({
+    onPlayPause: stablePlayPause,
+    onPrev: stablePrev,
+    onNext: stableNext,
+    onSeekBy: (delta) => {
+      const t = Math.max(0, Math.min(player.duration || 0, player.currentTime + delta))
+      latestHandlers.current.seek(t)
+    },
+    onVolumeBy: (delta) => {
+      const next = Math.max(0, Math.min(100, volume + delta))
+      stableVolumeChange(next)
+    },
+    onToggleMute: () => {
+      stableVolumeChange(volume > 0 ? 0 : preMuteVolumeRef.current || 70)
+    },
+  })
 
   // Active lyric for the mini-player popover (full text — popover does its
   // own CSS truncation when the window is narrow).
@@ -356,7 +486,116 @@ export function MusicPlayer() {
   const mutedRgba = (a: number) =>
     imageColors.muted.replace("rgb", "rgba").replace(")", `,${a})`)
 
+  /**
+   * Two-layer crossfade for the ambient background.
+   *
+   * Animating `background: gradient(...)` directly is one of the most
+   * expensive things you can transition — every frame the entire viewport
+   * is repainted because gradients aren't compositable on the GPU. We
+   * stamp the gradient onto a <div> (one paint, then static), and swap
+   * between two such layers on track change with `transition: opacity`,
+   * which the browser CAN run on the compositor at 60fps free.
+   */
+  const buildBackground = (palette: { dominant: string; secondary: string; muted: string }) => {
+    const dom = (a: number) =>
+      palette.dominant.replace("rgb", "rgba").replace(")", `,${a})`)
+    const sec = (a: number) =>
+      palette.secondary.replace("rgb", "rgba").replace(")", `,${a})`)
+    const mut = (a: number) =>
+      palette.muted.replace("rgb", "rgba").replace(")", `,${a})`)
+    return `
+      radial-gradient(ellipse at 20% 30%, ${dom(0.25)} 0%, transparent 55%),
+      radial-gradient(ellipse at 80% 70%, ${sec(0.18)} 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 100%, ${mut(0.15)} 0%, transparent 60%),
+      linear-gradient(135deg, rgba(18,18,28,0.95) 0%, rgba(12,12,22,0.98) 100%)
+    `
+  }
+
+  // Two ping-pong layers. When the palette changes, write the new palette
+  // into the inactive layer, then flip `activeLayer`. The newly active
+  // layer fades to opacity:1 while the old one fades to 0.
+  const [activeLayer, setActiveLayer] = useState<0 | 1>(0)
+  const [layerPalettes, setLayerPalettes] = useState<[ImagePalette, ImagePalette]>([
+    imageColors,
+    imageColors,
+  ])
+  useEffect(() => {
+    setLayerPalettes((prev) => {
+      const inactive = activeLayer === 0 ? 1 : 0
+      const next: [ImagePalette, ImagePalette] = [prev[0], prev[1]]
+      next[inactive] = imageColors
+      return next
+    })
+    setActiveLayer((a) => (a === 0 ? 1 : 0))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageColors.dominant, imageColors.secondary, imageColors.muted])
+
+  /**
+   * View transition styles. We deliberately avoid `transition-all` (which
+   * animates expensive properties like background and box-shadow) and use
+   * a macOS-flavored cubic bezier for a snappy enter / decisive exit.
+   *
+   * The `visibility` transition is delayed on exit so the off-screen view
+   * gets `visibility: hidden` once the fade completes — that flips it
+   * out of paint / composite work entirely until it animates back in.
+   */
+  const viewTransition =
+    "opacity .22s cubic-bezier(0.32, 0.72, 0, 1), transform .22s cubic-bezier(0.32, 0.72, 0, 1)"
+  const viewTransitionExit =
+    "opacity .16s cubic-bezier(0.4, 0, 1, 1), transform .16s cubic-bezier(0.4, 0, 1, 1), visibility 0s linear .16s"
+  const viewActiveStyle = {
+    opacity: 1,
+    transform: "translateY(0)",
+    visibility: "visible" as const,
+    pointerEvents: "auto" as const,
+    transition: viewTransition,
+  }
+  const viewInactiveStyle = {
+    opacity: 0,
+    transform: "translateY(1rem)",
+    visibility: "hidden" as const,
+    pointerEvents: "none" as const,
+    transition: viewTransitionExit,
+  }
+  // The "playing" overlay scales down on exit instead of translating up.
+  const playingActiveStyle = {
+    opacity: 1,
+    transform: "scale(1)",
+    visibility: "visible" as const,
+    pointerEvents: "auto" as const,
+    transition: viewTransition,
+  }
+  const playingInactiveStyle = {
+    opacity: 0,
+    transform: "scale(0.98)",
+    visibility: "hidden" as const,
+    pointerEvents: "none" as const,
+    transition: viewTransitionExit,
+  }
+
+  // Audio state for the context provider — consumers (ProgressBar /
+  // PlayButton / MiniCoverLoadingOverlay) re-render at 60fps without
+  // forcing PlayerControls or the whole MusicPlayer subtree to do the same.
+  const audioStateValue = useMemo(
+    () => ({
+      currentTime: player.currentTime,
+      duration: player.duration,
+      beatIntensity: player.beatIntensity,
+      isPlaying: player.isPlaying,
+      isLoading: isPreparingPlayback || player.isLoading,
+    }),
+    [
+      player.currentTime,
+      player.duration,
+      player.beatIntensity,
+      player.isPlaying,
+      player.isLoading,
+      isPreparingPlayback,
+    ]
+  )
+
   return (
+    <AudioStateContext.Provider value={audioStateValue}>
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-[#080810] font-sans">
       <SearchPanel
         open={showSearch}
@@ -372,30 +611,40 @@ export function MusicPlayer() {
         data-tauri-drag-region
         className="relative flex h-full w-full flex-col overflow-hidden"
         style={{
-          background: `
-            radial-gradient(ellipse at 20% 30%, ${dominantRgba(0.25)} 0%, transparent 55%),
-            radial-gradient(ellipse at 80% 70%, ${secondaryRgba(0.18)} 0%, transparent 50%),
-            radial-gradient(ellipse at 50% 100%, ${mutedRgba(0.15)} 0%, transparent 60%),
-            linear-gradient(135deg, rgba(18,18,28,0.95) 0%, rgba(12,12,22,0.98) 100%)
-          `,
           boxShadow: `
             0 0 0 1px rgba(255,255,255,0.05),
             0 25px 60px -12px rgba(0,0,0,0.7),
             0 0 100px -30px ${dominantRgba(0.25)}
           `,
-          transition: "background 1.4s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 1.4s cubic-bezier(0.4, 0, 0.2, 1)",
+          // boxShadow change is unavoidable while the dominant color moves;
+          // limit the work to the box-shadow only — gradient backgrounds
+          // are handled by the two crossfading layers below.
+          transition: "box-shadow 1.4s cubic-bezier(0.4, 0, 0.2, 1)",
         }}
       >
+        {/* Crossfading background layers — see buildBackground / activeLayer
+            comments above. They sit behind everything (z-index 0). */}
         <div
-          className="pointer-events-none absolute inset-0 z-0 rounded-2xl"
+          aria-hidden
+          className="pointer-events-none absolute inset-0 z-0"
           style={{
-            background: `
-              radial-gradient(ellipse at 25% 25%, ${dominantRgba(0.2)} 0%, transparent 50%),
-              radial-gradient(ellipse at 75% 75%, ${secondaryRgba(0.12)} 0%, transparent 45%)
-            `,
-            opacity: player.isPlaying ? 0.5 + player.beatIntensity * 0.5 : 0.3,
-            transition: "opacity 0.15s ease-out, background 1.4s cubic-bezier(0.4, 0, 0.2, 1)",
+            background: buildBackground(layerPalettes[0]),
+            opacity: activeLayer === 0 ? 1 : 0,
+            transition: "opacity 1.4s cubic-bezier(0.4, 0, 0.2, 1)",
           }}
+        />
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 z-0"
+          style={{
+            background: buildBackground(layerPalettes[1]),
+            opacity: activeLayer === 1 ? 1 : 0,
+            transition: "opacity 1.4s cubic-bezier(0.4, 0, 0.2, 1)",
+          }}
+        />
+        <BeatPulseOverlay
+          dominant={imageColors.dominant}
+          secondary={imageColors.secondary}
         />
 
         {/* Title Bar - Completely transparent dragging region to let macOS center its title perfectly */}
@@ -404,7 +653,7 @@ export function MusicPlayer() {
           <div className="flex items-center relative z-20">
             <button
               onClick={() => setShowSearch(true)}
-              className="flex items-center gap-1.5 rounded-full bg-foreground/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-foreground/[0.12] mr-2 text-white/80"
+              className="flex items-center gap-1.5 rounded-full bg-foreground/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-all duration-150 hover:bg-foreground/[0.12] active:scale-[0.96] active:bg-foreground/[0.18] mr-2 text-white/80"
             >
               <Search className="h-3.5 w-3.5" />
               搜索
@@ -420,7 +669,7 @@ export function MusicPlayer() {
             <nav className="flex flex-col gap-1.5 mb-8">
               <button
                 onClick={() => setViewMode("discover")}
-                className={`flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${viewMode === "discover" ? "bg-primary text-primary-foreground shadow-sm" : "text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground"
+                className={`flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-all duration-150 active:scale-[0.97] ${viewMode === "discover" ? "bg-primary text-primary-foreground shadow-sm" : "text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground active:bg-foreground/[0.08]"
                   }`}
               >
                 <Compass className="h-4 w-4" />
@@ -432,7 +681,7 @@ export function MusicPlayer() {
             <nav className="flex flex-col gap-1.5">
               <button
                 onClick={() => setViewMode("local")}
-                className={`flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${viewMode === "local" ? "bg-primary text-primary-foreground shadow-sm" : "text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground"
+                className={`flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-all duration-150 active:scale-[0.97] ${viewMode === "local" ? "bg-primary text-primary-foreground shadow-sm" : "text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground active:bg-foreground/[0.08]"
                   }`}
               >
                 <FolderOpen className="h-4 w-4" />
@@ -447,7 +696,7 @@ export function MusicPlayer() {
                   setCreatePlaylistInput("新建歌单")
                   setCreatePlaylistOpen(true)
                 }}
-                className="hover:text-foreground transition-colors p-1 rounded-sm hover:bg-foreground/10"
+                className="hover:text-foreground transition-all duration-150 p-1 rounded-sm hover:bg-foreground/10 active:scale-90 active:bg-foreground/15"
                 title="新建歌单"
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -462,7 +711,7 @@ export function MusicPlayer() {
                         playlistManager.setActivePlaylist(p.id)
                         setViewMode("playlist")
                       }}
-                      className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${viewMode === "playlist" && playlistManager.activePlaylistId === p.id ? "bg-foreground/[0.08] text-foreground" : "text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground"
+                      className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-all duration-150 active:scale-[0.97] ${viewMode === "playlist" && playlistManager.activePlaylistId === p.id ? "bg-foreground/[0.08] text-foreground" : "text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground active:bg-foreground/[0.08]"
                         }`}
                     >
                       <ListMusic className="h-4 w-4 shrink-0" />
@@ -511,7 +760,8 @@ export function MusicPlayer() {
           <div className="relative flex-1 overflow-hidden z-10">
             {/* View: Discover */}
             <div
-              className={`absolute inset-0 transition-all duration-700 ease-out overflow-y-auto ${viewMode === "discover" ? "opacity-100 pointer-events-auto translate-y-0" : "opacity-0 pointer-events-none translate-y-4"}`}
+              className="absolute inset-0 overflow-y-auto"
+              style={viewMode === "discover" ? viewActiveStyle : viewInactiveStyle}
             >
               <div className="flex flex-col items-center justify-center p-8 min-h-full py-20">
                 <div className="flex h-24 w-24 items-center justify-center rounded-[2rem] bg-primary/20 mb-6 shadow-2xl shadow-primary/10">
@@ -533,7 +783,8 @@ export function MusicPlayer() {
 
             {/* View: Local Music */}
             <div
-              className={`absolute inset-0 transition-all duration-700 ease-out flex flex-col ${viewMode === "local" ? "opacity-100 pointer-events-auto translate-y-0" : "opacity-0 pointer-events-none translate-y-4"}`}
+              className="absolute inset-0 flex flex-col"
+              style={viewMode === "local" ? viewActiveStyle : viewInactiveStyle}
             >
               <div className="p-10 max-w-4xl mx-auto h-full flex flex-col w-full pb-24">
                 <div className="mb-6 flex flex-col gap-4 border-b border-foreground/[0.04] pb-5 shrink-0">
@@ -545,7 +796,7 @@ export function MusicPlayer() {
                     <div className="flex gap-2">
                       <button
                         onClick={localScan.addFolder}
-                        className="flex items-center gap-1.5 rounded-full bg-foreground/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-foreground/[0.12]"
+                        className="flex items-center gap-1.5 rounded-full bg-foreground/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-all duration-150 hover:bg-foreground/[0.12] active:scale-[0.96] active:bg-foreground/[0.18]"
                       >
                         <FolderPlus className="h-3.5 w-3.5" />
                         添加文件夹
@@ -553,7 +804,7 @@ export function MusicPlayer() {
                       <button
                         onClick={localScan.rescan}
                         disabled={localScan.isScanning || localScan.folders.length === 0}
-                        className="flex items-center gap-1.5 rounded-full bg-foreground/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-foreground/[0.12] disabled:opacity-50"
+                        className="flex items-center gap-1.5 rounded-full bg-foreground/[0.05] px-3 py-1.5 text-xs font-medium text-foreground transition-all duration-150 hover:bg-foreground/[0.12] active:scale-[0.96] active:bg-foreground/[0.18] disabled:opacity-50"
                       >
                         <RefreshCw className={`h-3.5 w-3.5 ${localScan.isScanning ? "animate-spin" : ""}`} />
                         刷新
@@ -605,7 +856,8 @@ export function MusicPlayer() {
 
             {/* View: Playlist */}
             <div
-              className={`absolute inset-0 transition-all duration-700 ease-out overflow-y-auto ${viewMode === "playlist" ? "opacity-100 pointer-events-auto translate-y-0" : "opacity-0 pointer-events-none translate-y-4"}`}
+              className="absolute inset-0 overflow-y-auto"
+              style={viewMode === "playlist" ? viewActiveStyle : viewInactiveStyle}
             >
               <div className="p-10 max-w-4xl mx-auto h-full flex flex-col pb-24">
                 <div className="mb-6 flex items-end justify-between border-b border-foreground/[0.04] pb-5 shrink-0">
@@ -633,7 +885,8 @@ export function MusicPlayer() {
 
           {/* View: Playing (Full Overlay over Sidebar and Main Content) */}
           <div
-            className={`absolute inset-0 z-40 flex bg-background/95 backdrop-blur-3xl transition-all duration-700 ease-out overflow-hidden ${viewMode === "playing" ? "opacity-100 pointer-events-auto scale-100" : "opacity-0 pointer-events-none scale-[0.98]"}`}
+            className="absolute inset-0 z-40 flex bg-background/95 backdrop-blur-3xl overflow-hidden"
+            style={viewMode === "playing" ? playingActiveStyle : playingInactiveStyle}
           >
             {/* Left Cover & Visualizer */}
             <div className="flex w-[480px] shrink-0 flex-col items-center justify-center px-12 pt-4 pb-12">
@@ -696,24 +949,18 @@ export function MusicPlayer() {
         {/* Bottom Controls */}
         <PlayerControls
           currentTrack={currentTrack}
-          isPlaying={player.isPlaying}
-          onPlayPause={player.togglePlay}
-          onNext={handleNext}
-          onPrev={handlePrev}
+          onPlayPause={stablePlayPause}
+          onNext={stableNext}
+          onPrev={stablePrev}
           playMode={playMode}
-          onPlayModeChange={() => {
-            setPlayMode((prev) => (prev === "list" ? "single" : prev === "single" ? "shuffle" : "list"))
-          }}
+          onPlayModeChange={stableModeChange}
           volume={volume}
-          onVolumeChange={handleVolumeChange}
-          currentTime={player.currentTime}
-          duration={player.duration}
-          onSeek={player.seek}
-          beatIntensity={player.beatIntensity}
+          onVolumeChange={stableVolumeChange}
+          onSeek={stableSeek}
           viewMode={viewMode}
-          onToggleView={(mode) => setViewMode(mode)}
+          onToggleView={stableToggleView}
           playError={playError}
-          onRetry={handleRetryPlay}
+          onRetry={stableRetry}
         />
 
         <PlaylistSelector
@@ -751,7 +998,7 @@ export function MusicPlayer() {
             <DialogFooter>
               <button
                 onClick={() => setCreatePlaylistOpen(false)}
-                className="rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-white/10 transition-colors"
+                className="rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-white/10 active:bg-white/15 active:scale-[0.97] transition-all duration-150"
               >
                 取消
               </button>
@@ -763,7 +1010,7 @@ export function MusicPlayer() {
                   }
                 }}
                 disabled={!createPlaylistInput.trim()}
-                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 active:bg-primary/80 active:scale-[0.97] transition-all duration-150 disabled:opacity-50 disabled:active:scale-100"
               >
                 创建
               </button>
@@ -795,7 +1042,7 @@ export function MusicPlayer() {
             <DialogFooter>
               <button
                 onClick={() => setRenamePlaylistTarget(null)}
-                className="rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-white/10 transition-colors"
+                className="rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-white/10 active:bg-white/15 active:scale-[0.97] transition-all duration-150"
               >
                 取消
               </button>
@@ -807,7 +1054,7 @@ export function MusicPlayer() {
                   }
                 }}
                 disabled={!renameInput.trim()}
-                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 active:bg-primary/80 active:scale-[0.97] transition-all duration-150 disabled:opacity-50 disabled:active:scale-100"
               >
                 保存
               </button>
@@ -829,7 +1076,7 @@ export function MusicPlayer() {
             <DialogFooter>
               <button
                 onClick={() => setDeletePlaylistTarget(null)}
-                className="rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-white/10 transition-colors"
+                className="rounded-md px-4 py-2 text-sm font-medium text-foreground hover:bg-white/10 active:bg-white/15 active:scale-[0.97] transition-all duration-150"
               >
                 取消
               </button>
@@ -840,7 +1087,7 @@ export function MusicPlayer() {
                     setDeletePlaylistTarget(null)
                   }
                 }}
-                className="rounded-md bg-red-500/80 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 transition-colors"
+                className="rounded-md bg-red-500/80 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 active:bg-red-500/90 active:scale-[0.97] transition-all duration-150"
               >
                 删除
               </button>
@@ -850,5 +1097,6 @@ export function MusicPlayer() {
 
       </div>
     </div>
+    </AudioStateContext.Provider>
   )
 }

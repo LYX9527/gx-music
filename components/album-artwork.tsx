@@ -1,5 +1,7 @@
 "use client"
 
+import { memo } from "react"
+
 interface AlbumArtworkProps {
   src: string
   alt: string
@@ -7,7 +9,15 @@ interface AlbumArtworkProps {
   beatIntensity: number
 }
 
-export function AlbumArtwork({ src, alt, isPlaying, beatIntensity }: AlbumArtworkProps) {
+// Memoized so 60fps beatIntensity changes don't re-traverse the parent's
+// reconciliation tree. The expensive parts (vinyl gradient, glow, image)
+// only re-render when their actual deps change.
+export const AlbumArtwork = memo(function AlbumArtwork({
+  src,
+  alt,
+  isPlaying,
+  beatIntensity,
+}: AlbumArtworkProps) {
   const scale = isPlaying ? 1 + beatIntensity * 0.03 : 1
   const glowSize = isPlaying ? 40 + beatIntensity * 40 : 20
 
@@ -79,4 +89,4 @@ export function AlbumArtwork({ src, alt, isPlaying, beatIntensity }: AlbumArtwor
       </div>
     </div>
   )
-}
+})

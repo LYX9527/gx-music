@@ -1,5 +1,6 @@
 "use client"
 
+import { memo, useState } from "react"
 import {
   Play,
   Pause,
@@ -16,16 +17,24 @@ import {
   Mic2,
   RefreshCw,
   AlertCircle,
+  Loader2,
 } from "lucide-react"
 import { Slider } from "@/components/ui/slider"
+import { useAudioState } from "./audio-state-context"
 
 import { Track } from "./track-list"
 
 export type PlayMode = "list" | "single" | "shuffle"
 
+/**
+ * Props deliberately exclude high-frequency audio state
+ * (currentTime / duration / beatIntensity / isPlaying / isLoading) — those
+ * flow through `AudioStateContext` so this component can be wrapped in
+ * `memo` and stay frozen at 60fps. Only the play button and progress bar
+ * (which subscribe to the context) re-render on each tick.
+ */
 interface PlayerControlsProps {
   currentTrack: Track | null
-  isPlaying: boolean
   onPlayPause: () => void
   onNext: () => void
   onPrev: () => void
@@ -33,10 +42,7 @@ interface PlayerControlsProps {
   onPlayModeChange: () => void
   volume: number
   onVolumeChange: (v: number) => void
-  currentTime: number
-  duration: number
   onSeek: (t: number) => void
-  beatIntensity: number
   viewMode: "discover" | "playing" | "playlist" | "local"
   onToggleView: (mode: "discover" | "playing" | "playlist" | "local") => void
   playError?: string
@@ -49,15 +55,102 @@ function formatTime(seconds: number) {
   return `${mins}:${secs.toString().padStart(2, "0")}`
 }
 
+/**
+ * Subscribes to AudioStateContext for currentTime/duration. Holds a local
+ * `dragValue` so the slider thumb sticks to the user's pointer during a
+ * drag even as audio.currentTime keeps advancing in the background.
+ *
+ * `onValueCommit` (mouseup) fires the actual seek — this both prevents
+ * the thumb from snapping back and avoids hammering audio.currentTime=v
+ * on every micro-pixel of drag.
+ */
+interface ProgressBarProps {
+  onSeek: (t: number) => void
+}
+
+const ProgressBar = memo(function ProgressBar({ onSeek }: ProgressBarProps) {
+  const { currentTime, duration } = useAudioState()
+  const [dragValue, setDragValue] = useState<number | null>(null)
+  const display = dragValue ?? currentTime
+
+  return (
+    <div className="flex w-full items-center gap-3">
+      <span className="w-10 text-right text-[10px] tabular-nums text-muted-foreground">
+        {formatTime(display)}
+      </span>
+      <Slider
+        value={[display]}
+        max={duration || 100}
+        step={1}
+        onValueChange={([v]) => setDragValue(v)}
+        onValueCommit={([v]) => {
+          onSeek(v)
+          setDragValue(null)
+        }}
+        className="flex-1 [&_[data-slot=slider-track]]:h-1 [&_[data-slot=slider-track]]:bg-foreground/[0.08] [&_[data-slot=slider-range]]:bg-primary [&_[data-slot=slider-thumb]]:h-2.5 [&_[data-slot=slider-thumb]]:w-2.5 [&_[data-slot=slider-thumb]]:border-primary [&_[data-slot=slider-thumb]]:opacity-0 hover:[&_[data-slot=slider-thumb]]:opacity-100 focus-within:[&_[data-slot=slider-thumb]]:opacity-100 transition-opacity"
+      />
+      <span className="w-10 text-left text-[10px] tabular-nums text-muted-foreground">
+        {formatTime(duration)}
+      </span>
+    </div>
+  )
+})
+
+/**
+ * Subscribes to AudioStateContext so the beat-driven box-shadow updates at
+ * 60fps without re-rendering its parent.
+ */
+interface PlayButtonProps {
+  onPlayPause: () => void
+}
+
+const PlayButton = memo(function PlayButton({ onPlayPause }: PlayButtonProps) {
+  const { isPlaying, isLoading, beatIntensity } = useAudioState()
+  return (
+    <button
+      onClick={onPlayPause}
+      disabled={isLoading}
+      className="relative flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-md transition-transform duration-150 hover:scale-105 active:scale-95 disabled:opacity-90 disabled:cursor-progress"
+      style={{
+        boxShadow: isPlaying
+          ? `0 0 ${15 + beatIntensity * 20}px rgba(200, 80, 60, ${0.4 + beatIntensity * 0.4})`
+          : undefined,
+      }}
+      title={isLoading ? "加载中…" : isPlaying ? "暂停" : "播放"}
+    >
+      {isLoading ? (
+        <Loader2 className="h-4 w-4 animate-spin" />
+      ) : isPlaying ? (
+        <Pause className="h-4 w-4" fill="currentColor" />
+      ) : (
+        <Play className="h-4 w-4 ml-0.5" fill="currentColor" />
+      )}
+    </button>
+  )
+})
+
+/**
+ * Subscribes to isLoading only — used for the mini-cover loading overlay
+ * in the bottom-left of the player bar.
+ */
+const MiniCoverLoadingOverlay = memo(function MiniCoverLoadingOverlay() {
+  const { isLoading } = useAudioState()
+  if (!isLoading) return null
+  return (
+    <div className="absolute inset-0 flex items-center justify-center bg-black/45 backdrop-blur-[2px]">
+      <Loader2 className="h-4 w-4 animate-spin text-white" />
+    </div>
+  )
+})
+
 const PLAY_MODE_CONFIG: Record<PlayMode, { icon: typeof Repeat; label: string }> = {
   list: { icon: Repeat, label: "列表循环" },
   single: { icon: Repeat1, label: "单曲循环" },
   shuffle: { icon: Shuffle, label: "随机播放" },
 }
 
-export function PlayerControls({
+export const PlayerControls = memo(function PlayerControls({
   currentTrack,
-  isPlaying,
   onPlayPause,
   onNext,
   onPrev,
@@ -65,10 +158,7 @@ export function PlayerControls({
   onPlayModeChange,
   volume,
   onVolumeChange,
-  currentTime,
-  duration,
   onSeek,
-  beatIntensity,
   viewMode,
   onToggleView,
   playError,
@@ -100,6 +190,11 @@ export function PlayerControls({
                   <Music className="h-5 w-5 text-muted-foreground/50" />
                 </div>
               )}
+              {/* Loading overlay — sits on top of the cover while we resolve
+                  the streaming URL so users see "we got your click" before
+                  audio actually plays. Subscribes to AudioStateContext so it
+                  updates without re-rendering this whole component. */}
+              <MiniCoverLoadingOverlay />
               <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/20">
                 {viewMode === "playing" ? (
                   <SkipBack className="h-5 w-5 rotate-[-90deg] text-white" />
@@ -136,36 +231,21 @@ export function PlayerControls({
         <div className="flex items-center gap-5">
           <button
             onClick={onPlayModeChange}
-            className="group relative text-muted-foreground hover:text-primary transition-colors"
+            className="group relative text-muted-foreground hover:text-primary transition-all duration-150 active:scale-90"
             title={modeConfig.label}
           >
             <ModeIcon className="h-4 w-4" />
           </button>
-          <button onClick={onPrev} className="text-foreground hover:text-primary transition-colors" title="上一首">
+          <button onClick={onPrev} className="text-foreground hover:text-primary transition-all duration-150 active:scale-90" title="上一首">
             <SkipBack className="h-5 w-5" fill="currentColor" />
           </button>
-          <button
-            onClick={onPlayPause}
-            className="relative flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-md transition-all duration-200 hover:scale-105 active:scale-95"
-            style={{
-              boxShadow: isPlaying
-                ? `0 0 ${15 + beatIntensity * 20}px rgba(200, 80, 60, ${0.4 + beatIntensity * 0.4})`
-                : undefined,
-            }}
-            title={isPlaying ? "暂停" : "播放"}
-          >
-            {isPlaying ? (
-              <Pause className="h-4 w-4" fill="currentColor" />
-            ) : (
-              <Play className="h-4 w-4 ml-0.5" fill="currentColor" />
-            )}
-          </button>
-          <button onClick={onNext} className="text-foreground hover:text-primary transition-colors" title="下一首">
+          <PlayButton onPlayPause={onPlayPause} />
+          <button onClick={onNext} className="text-foreground hover:text-primary transition-all duration-150 active:scale-90" title="下一首">
             <SkipForward className="h-5 w-5" fill="currentColor" />
           </button>
           <button
             onClick={() => onToggleView(viewMode === "playing" ? "discover" : "playing")}
-            className={`text-muted-foreground hover:text-primary transition-colors ${viewMode === "playing" ? "text-primary" : ""}`}
+            className={`text-muted-foreground hover:text-primary transition-all duration-150 active:scale-90 ${viewMode === "playing" ? "text-primary" : ""}`}
             title="歌词"
           >
             <Mic2 className="h-4 w-4" />
@@ -179,7 +259,7 @@ export function PlayerControls({
             {onRetry && (
               <button
                 onClick={onRetry}
-                className="flex shrink-0 items-center gap-1 rounded-md bg-white/[0.06] px-2.5 py-1 text-[11px] font-medium text-white/70 transition-colors hover:bg-white/[0.12] hover:text-white/90"
+                className="flex shrink-0 items-center gap-1 rounded-md bg-white/[0.06] px-2.5 py-1 text-[11px] font-medium text-white/70 transition-all duration-150 hover:bg-white/[0.12] hover:text-white/90 active:scale-95 active:bg-white/[0.18]"
               >
                 <RefreshCw className="h-3 w-3" />
                 重试
@@ -187,17 +267,7 @@ export function PlayerControls({
             )}
           </div>
         ) : (
-          <div className="flex w-full items-center gap-3">
-            <span className="w-10 text-right text-[10px] tabular-nums text-muted-foreground">{formatTime(currentTime)}</span>
-            <Slider
-              value={[currentTime]}
-              max={duration || 100}
-              step={1}
-              onValueChange={([v]) => onSeek(v)}
-              className="flex-1 [&_[data-slot=slider-track]]:h-1 [&_[data-slot=slider-track]]:bg-foreground/[0.08] [&_[data-slot=slider-range]]:bg-primary [&_[data-slot=slider-thumb]]:h-2.5 [&_[data-slot=slider-thumb]]:w-2.5 [&_[data-slot=slider-thumb]]:border-primary [&_[data-slot=slider-thumb]]:opacity-0 hover:[&_[data-slot=slider-thumb]]:opacity-100 focus-within:[&_[data-slot=slider-thumb]]:opacity-100 transition-opacity"
-            />
-            <span className="w-10 text-left text-[10px] tabular-nums text-muted-foreground">{formatTime(duration)}</span>
-          </div>
+          <ProgressBar onSeek={onSeek} />
         )}
       </div>
 
@@ -206,7 +276,7 @@ export function PlayerControls({
         <div className="flex items-center gap-2 group">
           <button
             onClick={() => onVolumeChange(volume === 0 ? 70 : 0)}
-            className="text-muted-foreground hover:text-foreground transition-colors"
+            className="text-muted-foreground hover:text-foreground transition-all duration-150 active:scale-90"
           >
             <VolumeIcon className="h-4 w-4" />
           </button>
@@ -222,7 +292,7 @@ export function PlayerControls({
         </div>
         <button
           onClick={() => onToggleView(viewMode === "playlist" ? "discover" : "playlist")}
-          className={`text-muted-foreground hover:text-primary transition-colors ${viewMode === "playlist" ? "text-primary bg-primary/10 rounded-md p-1.5" : "p-1.5"}`}
+          className={`text-muted-foreground hover:text-primary transition-all duration-150 active:scale-90 ${viewMode === "playlist" ? "text-primary bg-primary/10 rounded-md p-1.5" : "p-1.5"}`}
           title="播放列表"
         >
           <ListMusic className="h-5 w-5" />
@@ -230,4 +300,4 @@ export function PlayerControls({
       </div>
     </div>
   )
-}
+})
